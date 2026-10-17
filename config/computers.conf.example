@@ -99,9 +99,8 @@ DE_SCREEN_QUEUE_DIR="/var/lib/digital-examen/screen-queue"
 DE_SCREEN_MIN_FREE_MB="512"
 DE_SCREEN_QUEUE_SEND="3"
 
-DE_AI_URL="https://as.1580.ru/ai"
+DE_AI_URL="https://as.1580.ru/api/computers/device/ai"
 DE_AI_TIMEOUT="2"
-DE_AI_SECRET_FILE="/etc/digital-examen/ai.secret"
 
 DE_STATS_INTERVAL="5"
 DE_HEARTBEAT_INTERVAL="30"

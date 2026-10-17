@@ -7,8 +7,8 @@ RUN apt-get update \
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r /tmp/requirements.txt
 
-COPY service.py model.py markers.py train.py label.py night.sh /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/service.py /usr/local/bin/train.py /usr/local/bin/label.py
+COPY service.py model.py markers.py train.py night.sh /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/service.py /usr/local/bin/train.py
 
 ENV PYTHONPATH=/usr/local/bin
 ENV PYTHONUNBUFFERED=1

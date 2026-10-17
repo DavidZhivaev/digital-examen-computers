@@ -2,61 +2,68 @@
 
 import json
 import os
-import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 
-LLAMA = os.environ.get("DE_AI_LLAMA", "/usr/local/bin/llama-cli")
-QWEN = os.environ.get("DE_AI_QWEN", "/models/qwen2.5-7b-instruct-q4_k_m.gguf")
-THREADS = os.environ.get("DE_AI_THREADS", "4")
-DOUBT_FILE = os.environ.get("DE_AI_DOUBT_FILE", "/models/doubt.jsonl")
-OUT_FILE = os.environ.get("DE_AI_DATA", "/models/labelled.jsonl")
-DONE_FILE = os.environ.get("DE_AI_DONE", "/models/doubt-done.jsonl")
+OLLAMA = os.environ.get("DE_AI_OLLAMA", "http://127.0.0.1:11434")
+MODEL = os.environ.get("DE_AI_OLLAMA_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
+DOUBT_FILE = os.environ.get("DE_AI_DOUBT_FILE", "/data/digital-examen/ai/doubt.jsonl")
+OUT_FILE = os.environ.get("DE_AI_DATA", "/data/digital-examen/ai/labelled.jsonl")
+DONE_FILE = os.environ.get("DE_AI_DONE", "/data/digital-examen/ai/doubt-done.jsonl")
 LIMIT = int(os.environ.get("DE_AI_LABEL_LIMIT", "200"))
+TIMEOUT = int(os.environ.get("DE_AI_LABEL_TIMEOUT", "180"))
 
-PROMPT = """Ты размечаешь страницы для школьного фильтра.
-Ответь строго одной строкой JSON без пояснений:
-{"ai": true|false, "confidence": 0..1, "quote": "короткая цитата со страницы"}
+RULES = """Ты размечаешь страницы для школьного фильтра.
 ai=true, если страница это разговор с искусственным интеллектом, ответ
-нейросети или сервис генерации текста и картинок. ai=false во всех
-остальных случаях, включая новости и статьи про ИИ.
+нейросети или сервис генерации текста и картинок.
+ai=false во всех остальных случаях, включая новости и статьи про ИИ.
+Ответь только объектом JSON с полями ai, confidence, quote."""
 
-Адрес: %s
+ASK = """Адрес: %s
 Заголовок: %s
-Текст: %s
-"""
+Текст: %s"""
 
 
 def ask(sample):
-    text = PROMPT % (
-        sample.get("url", "")[:300],
-        sample.get("title", "")[:200],
-        sample.get("text", "")[:1500],
-    )
-    command = [
-        "nice", "-n", "19",
-        LLAMA, "-m", QWEN, "-t", THREADS,
-        "--temp", "0", "-n", "120", "--no-display-prompt", "-no-cnv",
-        "-p", text,
-    ]
+    body = json.dumps({
+        "model": MODEL,
+        "stream": False,
+        "format": "json",
+        "keep_alive": "5m",
+        "options": {"temperature": 0, "num_predict": 200},
+        "messages": [
+            {"role": "system", "content": RULES},
+            {"role": "user", "content": ASK % (
+                sample.get("url", "")[:300],
+                sample.get("title", "")[:200],
+                sample.get("text", "")[:1500],
+            )},
+        ],
+    }).encode()
+
+    request = urllib.request.Request(OLLAMA.rstrip("/") + "/api/chat", data=body)
+    request.add_header("Content-Type", "application/json")
+
     try:
-        output = subprocess.check_output(command, stderr=subprocess.DEVNULL, timeout=600)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
+        answer = json.loads(urllib.request.urlopen(request, timeout=TIMEOUT).read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as error:
         sys.stdout.write("модель не ответила: %s\n" % error)
         return None
 
-    body = output.decode("utf-8", "replace")
-    start = body.find("{")
-    end = body.rfind("}")
+    text = answer.get("message", {}).get("content", "")
+    start = text.find("{")
+    end = text.rfind("}")
     if start < 0 or end <= start:
         return None
     try:
-        answer = json.loads(body[start:end + 1])
+        found = json.loads(text[start:end + 1])
     except ValueError:
         return None
-    if "ai" not in answer:
+    if "ai" not in found:
         return None
-    return answer
+    return found
 
 
 def read_jsonl(path):
@@ -81,10 +88,6 @@ def append(path, row):
 
 
 def main():
-    if not os.path.exists(QWEN) or not os.path.exists(LLAMA):
-        sys.stdout.write("нет большой модели или llama-cli, разметка пропущена\n")
-        return 0
-
     done = set()
     for row in read_jsonl(DONE_FILE):
         done.add(row.get("url", ""))
@@ -96,19 +99,19 @@ def main():
 
     marked = 0
     for sample in waiting[:LIMIT]:
-        answer = ask(sample)
+        found = ask(sample)
         append(DONE_FILE, {"url": sample.get("url", ""), "at": int(time.time())})
-        if answer is None:
+        if found is None:
             continue
         append(OUT_FILE, {
             "host": sample.get("host", ""),
             "url": sample.get("url", ""),
             "title": sample.get("title", ""),
             "text": sample.get("text", ""),
-            "label": int(bool(answer.get("ai"))),
-            "confidence": answer.get("confidence", 0),
-            "quote": str(answer.get("quote", ""))[:300],
-            "by": "qwen2.5-7b",
+            "label": int(bool(found.get("ai"))),
+            "confidence": found.get("confidence", 0),
+            "quote": str(found.get("quote", ""))[:300],
+            "by": MODEL,
         })
         marked += 1
 

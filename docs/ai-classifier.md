@@ -39,13 +39,21 @@ POST /classify  {host, url, title, text} -> {ai, confidence, quote, reason, ms}
 
 ## Почему именно так, а не одна большая модель
 
-`Qwen2.5-7B-Instruct Q4_K_M` (4,7 ГБ, llama.cpp, 4 потока) на восьми ядрах ШС
-обрабатывает страницу секундами. На 1440 машин это не считается — то же
-арифметическое ограничение, из-за которого фильтр живёт на компьютерах, а не
-на ШС. Поэтому большая модель работает **ночью** и только:
+Большая модель на восьми ядрах ШС обрабатывает страницу секундами. На 1440
+машин это не считается — то же арифметическое ограничение, из-за которого
+фильтр живёт на компьютерах, а не на ШС. Поэтому большая модель работает
+**ночью** и только:
 
 - размечает спорные страницы (`doubt.jsonl`, уверенность от 0,35 до 0,75);
-- отвечает строго одной строкой JSON, иначе ответ отбрасывается.
+- отвечает строго объектом JSON, иначе ответ отбрасывается.
+
+Берётся та модель, которая **уже стоит на ШС**: там есть `ollama` с
+`qwen3:4b-instruct-2507-q4_K_M` (2,5 ГБ). Качать `Qwen2.5-7B` (4,7 ГБ) и
+ставить рядом второй движок незачем. `ollama` слушает только петлю хоста,
+поэтому разметка запускается **не в контейнере, а на самом ШС** таймером
+`de-ai-label.timer` (01:10, `Nice=19`, `IOSchedulingClass=idle`) — это
+дешевле и безопаснее, чем давать контейнеру сеть хоста. Модель меняется
+переменной `DE_AI_OLLAMA_MODEL`.
 
 Утром `train.py` доучивает логистическую регрессию на размеченном
 (`labelled.jsonl`) и печатает F1 по пяти частям — это и есть проверка, что
@@ -54,11 +62,10 @@ POST /classify  {host, url, title, text} -> {ai, confidence, quote, reason, ms}
 ## Разметка и обучение руками
 
 ```
-# на ШС
-docker compose -f /opt/digital-examen-computers/ai/docker-compose.yml exec de-ai-night \
-    python3 /usr/local/bin/label.py
-docker compose -f /opt/digital-examen-computers/ai/docker-compose.yml exec de-ai-night \
-    python3 /usr/local/bin/train.py
+# на ШС: разметка идёт на хосте, обучение в контейнере
+systemctl start de-ai-label.service && journalctl -u de-ai-label -n 20
+docker compose -f /opt/digital-examen/computers/ai/docker-compose.yml \
+    exec de-ai-night python3 /usr/local/bin/train.py
 ```
 
 Файлы лежат в `/data/digital-examen/ai`:
@@ -71,7 +78,7 @@ docker compose -f /opt/digital-examen-computers/ai/docker-compose.yml exec de-ai
 | `classifier.pkl` | обученная логистическая регрессия |
 | `classifier.json` | числа последнего обучения |
 | `e5-small/` | скачанная модель векторов |
-| `qwen2.5-7b-instruct-q4_k_m.gguf` | большая модель для ночной разметки |
+Большая модель для ночной разметки лежит не здесь, а в хранилище `ollama`.
 
 Меньше 40 размеченных страниц — `train.py` отказывается обучаться и так и
 говорит.

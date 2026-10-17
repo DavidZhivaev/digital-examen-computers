@@ -30,7 +30,8 @@ def read_config(path=CONFIG_FILE):
 CONFIG = read_config()
 AI_URL = CONFIG.get("DE_AI_URL", "")
 AI_TIMEOUT = float(CONFIG.get("DE_AI_TIMEOUT", "2"))
-AI_SECRET_FILE = CONFIG.get("DE_AI_SECRET_FILE", "/etc/digital-examen/ai.secret")
+AI_SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
+COMPUTER = CONFIG.get("DE_COMPUTER_ID", "")
 
 
 def read_policy(path=POLICY_FILE):
@@ -129,10 +130,12 @@ def list_hits(lines, host):
 def ask_ai(host, url="", title="", text=""):
     """Спросить классификатор на школьном сервере: это ИИ или нет.
 
-    Модель ничего не блокирует сама — она отвечает «ИИ или не ИИ» с
-    уверенностью и цитатой, а решение принимает группа ограничений. Если
-    классификатор молчит или отвечает долго, страница пропускается: закрыть
-    весь интернет из-за недоступной модели нельзя.
+    Спрашиваем через сайт, своим личным секретом: сам классификатор живёт в
+    docker-сети школьного сервера и наружу не смотрит, общего на всю школу
+    секрета ни у кого нет. Модель ничего не блокирует сама — она отвечает
+    «ИИ или не ИИ» с уверенностью и цитатой, а решение принимает группа
+    ограничений. Если классификатор молчит или отвечает долго, страница
+    пропускается: закрыть весь интернет из-за недоступной модели нельзя.
     """
     if not AI_URL:
         return False, 0.0, ""
@@ -142,8 +145,9 @@ def ask_ai(host, url="", title="", text=""):
         secret = open(AI_SECRET_FILE).read().strip()
 
     body = json.dumps({"host": host, "url": url, "title": title, "text": text}).encode()
-    request = urllib.request.Request(AI_URL.rstrip("/") + "/classify", data=body)
+    request = urllib.request.Request(AI_URL, data=body)
     request.add_header("Content-Type", "application/json")
+    request.add_header("X-De-Computer", COMPUTER)
     if secret:
         request.add_header("X-De-Secret", secret)
 

@@ -1,0 +1,13 @@
+[Unit]
+Description=Digital Examen ночная разметка спорных страниц большой моделью
+After=network-online.target ollama.service
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+Environment=DE_AI_OLLAMA=http://127.0.0.1:11434
+Environment=DE_AI_DOUBT_FILE=/data/digital-examen/ai/doubt.jsonl
+Environment=DE_AI_DATA=/data/digital-examen/ai/labelled.jsonl
+Environment=DE_AI_DONE=/data/digital-examen/ai/doubt-done.jsonl
+ExecStart=/usr/bin/python3 /opt/digital-examen/computers/ai/label.py
