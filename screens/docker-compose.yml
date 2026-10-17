@@ -15,7 +15,9 @@ services:
     environment:
       DE_COMMAND_SECRET: /etc/digital-examen/command.secret
       DE_SECRETS_DIR: /data/secrets
-      DE_ALLOW_SHARED_SECRET: "${DE_ALLOW_SHARED_SECRET:-1}"
+      # Общий секрет на всю школу выключен: приёмник принимает только
+      # личный секрет компьютера, выданный ему при постановке на учёт.
+      DE_ALLOW_SHARED_SECRET: "${DE_ALLOW_SHARED_SECRET:-0}"
       DE_SCREEN_MIN_FREE_GB: "50"
     networks:
       - de-edge
