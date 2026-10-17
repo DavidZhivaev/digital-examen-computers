@@ -81,12 +81,15 @@ def read_mode():
 
 
 def budget_interval(recent):
+    base = float(CONFIG.get("DE_SCREEN_INTERVAL", "3"))
+    if BUDGET_KBITS <= 0:
+        return base
     if not recent:
-        return INTERVAL_MIN
+        return base
     average = sum(recent) / float(len(recent))
     allowed = BUDGET_KBITS * 1000.0 / 8.0
     if allowed <= 0:
-        return INTERVAL_MAX
+        return base
     wanted = average / allowed
     if wanted < INTERVAL_MIN:
         return INTERVAL_MIN

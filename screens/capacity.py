@@ -15,13 +15,12 @@ LESSON_MIN = 40
 BREAK_MIN = 15
 BREAK_STATIC_SHARE = 20
 
-LESSON_STEP = 8
-BREAK_STEP = 12
-COLD_STEP = 16
-HOT_DAYS = 10
+NETWORK_STEP = 3
+STORE_STEP = 3
+LIVE_STEP = 1
 
-BUSY_FRAME = {1: 2329, 2: 2806, 4: 3687, 8: 6619, 12: 6899, 16: 10104, 24: 18627}
-CALM_FRAME = {1: 1078, 2: 1169, 4: 1189, 8: 1176, 12: 937, 16: 1253, 24: 1041}
+BUSY_FRAME = {1: 2329, 2: 2806, 3: 3108, 4: 3687, 6: 3686, 8: 6619, 12: 6899, 16: 10104, 24: 18627}
+CALM_FRAME = {1: 1078, 2: 1169, 3: 991, 4: 1189, 6: 874, 8: 1176, 12: 937, 16: 1253, 24: 1041}
 
 SCENARIOS = {
     "поток текста без остановки": 1.00,
@@ -59,41 +58,32 @@ def day_parts():
 
 def model(busy_share):
     lesson_s, break_s = day_parts()
-
-    during_lesson = rate(LESSON_STEP, busy_share)
-    active_break = rate(BREAK_STEP, busy_share)
-    static_break = rate(BREAK_STEP, 0.0)
-
-    share = BREAK_STATIC_SHARE / 100.0
-    during_break = share * static_break + (1.0 - share) * active_break
-
-    day_bytes = lesson_s * during_lesson + break_s * during_break
     seconds = lesson_s + break_s
 
-    cold_lesson = rate(COLD_STEP, busy_share)
-    cold_break = share * rate(COLD_STEP, 0.0) + (1.0 - share) * rate(COLD_STEP, busy_share)
-    cold_bytes = lesson_s * cold_lesson + break_s * cold_break
+    share = BREAK_STATIC_SHARE / 100.0
+
+    net_lesson = rate(NETWORK_STEP, busy_share)
+    net_break = share * rate(NETWORK_STEP, 0.0) + (1.0 - share) * rate(NETWORK_STEP, busy_share)
+    net_bytes = lesson_s * net_lesson + break_s * net_break
+
+    store_lesson = rate(STORE_STEP, busy_share)
+    store_break = share * rate(STORE_STEP, 0.0) + (1.0 - share) * rate(STORE_STEP, busy_share)
+    store_bytes = lesson_s * store_lesson + break_s * store_break
 
     return {
-        "kbits": day_bytes / seconds * 8 / 1000.0,
-        "peak_kbits": during_lesson * 8 / 1000.0,
-        "mb_day": day_bytes / 1e6,
-        "cold_mb_day": cold_bytes / 1e6,
-        "corpus_mbits": day_bytes / seconds * 8 * PER_CORPUS / 1e6,
-        "school_gb_day": day_bytes * COMPUTERS / 1e9,
-        "school_cold_gb_day": cold_bytes * COMPUTERS / 1e9,
+        "kbits": net_bytes / seconds * 8 / 1000.0,
+        "peak_kbits": net_lesson * 8 / 1000.0,
+        "mb_day": store_bytes / 1e6,
+        "corpus_mbits": net_bytes / seconds * 8 * PER_CORPUS / 1e6,
+        "school_gb_day": store_bytes * COMPUTERS / 1e9,
     }
 
 
 def days_fit(result):
-    hot = result["school_gb_day"]
-    cold = result["school_cold_gb_day"]
-    used = 0.0
-    for day in range(1, 400):
-        used = hot * min(day, HOT_DAYS) + cold * max(0, day - HOT_DAYS)
-        if used > DISK_BUDGET_GB:
-            return day - 1
-    return 400
+    per_day = result["school_gb_day"]
+    if per_day <= 0:
+        return 0
+    return int(DISK_BUDGET_GB / per_day)
 
 
 def main():
@@ -101,8 +91,8 @@ def main():
     allowed = LINK_MBITS * LINK_SHARE / 100.0
 
     print("1024x576, тайл 16x16, изменения склеиваются в полосы")
-    print("Урок: кадр раз в %d с, перемена: раз в %d с, после %d дней: раз в %d с" % (
-        LESSON_STEP, BREAK_STEP, HOT_DAYS, COLD_STEP))
+    print("По сети: кадр раз в %d с. На диск: кадр раз в %d с. Живой просмотр: раз в %d с." % (
+        NETWORK_STEP, STORE_STEP, LIVE_STEP))
     print("День: уроки %d мин, перемены %d мин, статичных на перемене %d%%" % (
         lesson_s // 60, break_s // 60, BREAK_STATIC_SHARE))
     print("Компьютеров %d, в корпусе %d. Канал %d Мбит/с, можно %g. Диск %d ГБ." % (
@@ -111,7 +101,7 @@ def main():
     print("%-28s %8s %8s %9s %10s %10s" % (
         "сценарий", "кбит/с", "пик", "МБ/день", "корпус", "школа"))
     print("%-28s %8s %8s %9s %10s %10s" % (
-        "", "средн.", "урок", "на комп", "Мбит/с", "ГБ/день"))
+        "", "средн.", "урок", "на диск", "Мбит/с", "ГБ/день"))
 
     results = {}
     for name, busy in SCENARIOS.items():
@@ -123,18 +113,17 @@ def main():
             item["corpus_mbits"], item["school_gb_day"], mark))
 
     print()
-    print("Хранение: %d дней как есть, дальше прорежено до %d с" % (HOT_DAYS, COLD_STEP))
+    print("Сколько дней помещается в %d ГБ" % DISK_BUDGET_GB)
     print("%-28s %12s %12s %14s" % ("сценарий", "10 дней", "30 дней", "влезает дней"))
     for name in SCENARIOS:
         item = results[name]
-        ten = item["school_gb_day"] * 10
-        thirty = item["school_gb_day"] * 10 + item["school_cold_gb_day"] * 20
-        print("%-28s %10.0f ГБ %10.0f ГБ %12d" % (name, ten, thirty, days_fit(item)))
+        print("%-28s %10.0f ГБ %10.0f ГБ %12d" % (
+            name, item["school_gb_day"] * 10, item["school_gb_day"] * 30, days_fit(item)))
 
     print()
-    print("Живой просмотр учителем, кадр раз в 2 с:")
+    print("Живой просмотр учителем, кадр раз в %d с:" % LIVE_STEP)
     for name, busy in SCENARIOS.items():
-        one = rate(2, busy) * 8 / 1000.0
+        one = rate(LIVE_STEP, busy) * 8 / 1000.0
         print("  %-28s один комп %6.1f кбит/с   кабинет 18 машин %6.2f Мбит/с   корпус 360 машин %6.1f Мбит/с" % (
             name, one, one * 18 / 1000.0, one * 360 / 1000.0))
 
