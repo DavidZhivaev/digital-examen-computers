@@ -8,11 +8,15 @@ services:
       - "10.171.219.221:9840:9840"
     volumes:
       - /data/digital-examen/screens:/data/screens
+      - /data/digital-examen/secrets:/data/secrets
       - /run/digital-examen/live:/run/digital-examen/live
       - ./proxy.secret:/etc/digital-examen/proxy.secret:ro
       - ./command.secret:/etc/digital-examen/command.secret:ro
     environment:
       DE_COMMAND_SECRET: /etc/digital-examen/command.secret
+      DE_SECRETS_DIR: /data/secrets
+      DE_ALLOW_SHARED_SECRET: "${DE_ALLOW_SHARED_SECRET:-1}"
+      DE_SCREEN_MIN_FREE_GB: "50"
     networks:
       - de-edge
 
@@ -33,6 +37,7 @@ services:
       DE_API_URL: "${DE_API_URL:-https://as.1580.ru}"
       DE_NOTIFY_URL: "http://de-alerts:8099/notify"
       DE_SCREEN_LIMIT_GB: "900"
+      DE_SCREEN_MIN_FREE_GB: "50"
     networks:
       - de-edge
 

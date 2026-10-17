@@ -4,10 +4,16 @@ import json
 import os
 import socket
 import ssl
+import subprocess
+import time
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+
+sys.path.insert(0, "/usr/local/lib/digital-examen")
+
+import de_keys
 
 CONFIG_FILE = "/etc/digital-examen/computers.conf"
 
@@ -34,6 +40,9 @@ CONFIG = read_config()
 API = CONFIG.get("DE_API_URL", "https://as.1580.ru")
 PROXY_SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
 COMMAND_SECRET_FILE = CONFIG.get("DE_COMMAND_SECRET_FILE", "/etc/digital-examen/command.secret")
+SCREEN_SECRET_FILE = CONFIG.get("DE_SCREEN_SECRET_FILE", "/etc/digital-examen/screen.secret")
+VAULT_SECRET_FILE = CONFIG.get("DE_VAULT_SECRET_FILE", "/etc/digital-examen/vault.secret")
+KEY_FILE_NAME = CONFIG.get("DE_KEY_FILE", "de-key.txt")
 
 
 def say(message):
@@ -52,6 +61,30 @@ def call(path, payload=None, params=None):
     context = ssl.create_default_context()
     answer = urllib.request.urlopen(request, timeout=25, context=context)
     return json.loads(answer.read().decode("utf-8"))
+
+
+def wait_for_key():
+    """Без ключа администратора компьютер на учёт не ставится.
+
+    Ключ лежит файлом в корне флешки, выдаёт его сайт администратору
+    информатики или школы. Права владельца сайт проверяет заново на каждой
+    установке, поэтому отобранные права закрывают и установку.
+    """
+    say("Вставьте флешку с ключом администратора (файл %s)." % KEY_FILE_NAME)
+    say("Ключ скачивается на сайте: Компьютеры → Скачать ключ.")
+    say("Отмена — Ctrl+C.")
+    while True:
+        path = de_keys.find_key(KEY_FILE_NAME)
+        if path:
+            values = de_keys.parse_key(path)
+            if values.get("fingerprint") and values.get("secret"):
+                say("Ключ найден: %s" % path)
+                return values
+            say("Файл ключа найден, но в нём нет fingerprint и secret.")
+        try:
+            time.sleep(3)
+        except KeyboardInterrupt:
+            return {}
 
 
 def ask_number(question, low, high):
@@ -108,6 +141,11 @@ def main():
 
     if not os.path.exists(CONFIG_FILE):
         say("Нет %s — сначала отработает setup.sh." % CONFIG_FILE)
+        return 1
+
+    key = wait_for_key()
+    if not key:
+        say("Ключ не предъявлен, установка прервана.")
         return 1
 
     existing = CONFIG.get("DE_COMPUTER_ID", "")
@@ -171,6 +209,8 @@ def main():
             "room": room,
             "number": number,
             "hostname": socket.gethostname(),
+            "fingerprint": key.get("fingerprint", ""),
+            "secret": key.get("secret", ""),
         })
     except urllib.error.HTTPError as error:
         body = error.read().decode("utf-8", "replace")
@@ -182,6 +222,8 @@ def main():
 
     write_secret(PROXY_SECRET_FILE, created.get("proxy_secret", ""))
     write_secret(COMMAND_SECRET_FILE, created.get("command_secret", ""))
+    write_secret(SCREEN_SECRET_FILE, created.get("screen_secret", ""))
+    write_secret(VAULT_SECRET_FILE, created.get("vault_secret", ""))
 
     write_config({
         "DE_COMPUTER_ID": created.get("computer", name),
@@ -198,6 +240,12 @@ def main():
         out = open(CONFIG.get("DE_POLICY_FILE", "/run/digital-examen/policy.json"), "w")
         out.write(json.dumps(policy))
         out.close()
+
+    say("Беру выгрузку учёток для входа без интернета.")
+    code = subprocess.call(["/usr/local/sbin/de-vault", "sync"])
+    if code != 0:
+        say("Выгрузка не получена, вход без интернета пока не работает.")
+        say("Проверить потом: de-vault sync, затем de-vault show.")
 
     say("")
     say("Готово. Компьютер зарегистрирован как %s." % created.get("computer", name))

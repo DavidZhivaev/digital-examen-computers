@@ -3,9 +3,34 @@
 import ipaddress
 import json
 import os
+import urllib.error
+import urllib.request
 
 POLICY_FILE = "/run/digital-examen/policy.json"
 STATE_DIR = "/var/lib/digital-examen/users"
+CONFIG_FILE = "/etc/digital-examen/computers.conf"
+
+
+def read_config(path=CONFIG_FILE):
+    values = {}
+    if not os.path.exists(path):
+        return values
+    for line in open(path):
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[name.strip()] = value
+    return values
+
+
+CONFIG = read_config()
+AI_URL = CONFIG.get("DE_AI_URL", "")
+AI_TIMEOUT = float(CONFIG.get("DE_AI_TIMEOUT", "2"))
+AI_SECRET_FILE = CONFIG.get("DE_AI_SECRET_FILE", "/etc/digital-examen/ai.secret")
 
 
 def read_policy(path=POLICY_FILE):
@@ -101,7 +126,36 @@ def list_hits(lines, host):
     return False
 
 
-def decide(host, login, policy=None):
+def ask_ai(host, url="", title="", text=""):
+    """Спросить классификатор на школьном сервере: это ИИ или нет.
+
+    Модель ничего не блокирует сама — она отвечает «ИИ или не ИИ» с
+    уверенностью и цитатой, а решение принимает группа ограничений. Если
+    классификатор молчит или отвечает долго, страница пропускается: закрыть
+    весь интернет из-за недоступной модели нельзя.
+    """
+    if not AI_URL:
+        return False, 0.0, ""
+
+    secret = ""
+    if os.path.exists(AI_SECRET_FILE):
+        secret = open(AI_SECRET_FILE).read().strip()
+
+    body = json.dumps({"host": host, "url": url, "title": title, "text": text}).encode()
+    request = urllib.request.Request(AI_URL.rstrip("/") + "/classify", data=body)
+    request.add_header("Content-Type", "application/json")
+    if secret:
+        request.add_header("X-De-Secret", secret)
+
+    try:
+        answer = json.loads(urllib.request.urlopen(request, timeout=AI_TIMEOUT).read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+        return False, 0.0, ""
+
+    return bool(answer.get("ai")), float(answer.get("confidence", 0)), str(answer.get("quote", ""))
+
+
+def decide(host, login, policy=None, url="", title="", text=""):
     """«pass» или «block» плюс название группы, из-за которой решение принято.
 
     Учитель и выше ограничениями не связан: подсистема сделана для учеников,
@@ -124,5 +178,10 @@ def decide(host, login, policy=None):
 
         if list_hits(group.get("denied"), host):
             return "block", group.get("name", ""), bool(group.get("notify"))
+
+        if group.get("ai_auto"):
+            is_ai, chance, _ = ask_ai(host, url, title, text)
+            if is_ai:
+                return "block", group.get("name", ""), bool(group.get("notify"))
 
     return "pass", "", False

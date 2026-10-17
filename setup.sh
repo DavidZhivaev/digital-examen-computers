@@ -15,6 +15,7 @@ CONFIG_DIR=/etc/digital-examen
 CONFIG_FILE=$CONFIG_DIR/computers.conf
 STATE_DIR=/var/lib/digital-examen/users
 BIN_DIR=/usr/local/sbin
+LIB_DIR=/usr/local/lib/digital-examen
 PAM_FILE=/etc/pam.d/sddm
 MARK_START="# digital-examen-computers begin"
 MARK_END="# digital-examen-computers end"
@@ -61,8 +62,15 @@ mkdir -p "$STATE_DIR"
 chmod 0755 "$CONFIG_DIR"
 chmod 0700 "$STATE_DIR"
 
+say "ставлю общие модули в $LIB_DIR"
+mkdir -p "$LIB_DIR"
+for module in de_vault.py de_users.py de_keys.py; do
+    install -m 0640 -o root -g root "$HERE/pylib/$module" "$LIB_DIR/$module"
+done
+chmod 0750 "$LIB_DIR"
+
 say "ставлю скрипты в $BIN_DIR"
-for script in de-login-auth de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen de-agent de-palette de-report de-policy de-keywatch de-traffic de-init de-update; do
+for script in de-login-auth de-offline-auth de-vault de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen de-agent de-palette de-report de-policy de-keywatch de-traffic de-init de-update; do
     install -m 0750 -o root -g root "$HERE/bin/$script" "$BIN_DIR/$script"
 done
 install -m 0755 -o root -g root "$HERE/bin/de-session-start" /usr/local/bin/de-session-start
@@ -129,6 +137,7 @@ else
         /^auth[ \t]+substack[ \t]+system-auth/ && done != 1 {
             print start
             print "auth        [success=done default=ignore]        pam_exec.so expose_authtok quiet /usr/local/sbin/de-login-auth"
+            print "auth        [success=done default=ignore]        pam_exec.so expose_authtok quiet /usr/local/sbin/de-offline-auth"
             print stop
             done = 1
         }
@@ -148,14 +157,23 @@ else
     chmod 0644 "$PAM_FILE"
 fi
 
-say "создаю общий секрет для прокси"
-SECRET_FILE="${DE_PROXY_SECRET_FILE:-/etc/digital-examen/proxy.secret}"
-if [ ! -f "$SECRET_FILE" ]; then
-    say "секрета нет, впишите его вручную в $SECRET_FILE"
-    touch "$SECRET_FILE"
-fi
-chmod 0600 "$SECRET_FILE"
-chown root:root "$SECRET_FILE"
+say "готовлю файлы секретов этого компьютера"
+for SECRET_FILE in \
+    "${DE_PROXY_SECRET_FILE:-/etc/digital-examen/proxy.secret}" \
+    "${DE_COMMAND_SECRET_FILE:-/etc/digital-examen/command.secret}" \
+    "${DE_SCREEN_SECRET_FILE:-/etc/digital-examen/screen.secret}" \
+    "${DE_VAULT_SECRET_FILE:-/etc/digital-examen/vault.secret}"; do
+    [ -f "$SECRET_FILE" ] || touch "$SECRET_FILE"
+    chmod 0600 "$SECRET_FILE"
+    chown root:root "$SECRET_FILE"
+done
+say "секреты выдаст сайт при постановке на учёт, свои на каждый компьютер"
+
+say "создаю каталоги хранилища офлайн-входа и очереди кадров"
+mkdir -p "${DE_VAULT_DIR:-/var/lib/digital-examen/vault}"
+chmod 0700 "${DE_VAULT_DIR:-/var/lib/digital-examen/vault}"
+mkdir -p "${DE_SCREEN_QUEUE_DIR:-/var/lib/digital-examen/screen-queue}"
+chmod 0700 "${DE_SCREEN_QUEUE_DIR:-/var/lib/digital-examen/screen-queue}"
 
 say "ставлю сеанс со школьным прокси"
 mkdir -p /usr/share/xsessions
@@ -191,7 +209,7 @@ if ! grep -q "notingroup $GROUP" /etc/pam.d/login; then
 fi
 
 say "ставлю службы"
-for unit in de-cleanup.service de-screen.service de-agent.service de-keywatch.service de-traffic.service de-update.service de-update.timer; do
+for unit in de-cleanup.service de-screen.service de-agent.service de-keywatch.service de-traffic.service de-update.service de-update.timer de-vault-sync.service de-vault-sync.timer; do
     install -m 0644 -o root -g root "$HERE/systemd/$unit" "/etc/systemd/system/$unit"
 done
 systemctl daemon-reload
@@ -201,6 +219,7 @@ systemctl enable de-agent.service
 systemctl enable de-keywatch.service
 systemctl enable de-traffic.service
 systemctl enable de-update.timer
+systemctl enable de-vault-sync.timer
 
 say "проверяю, что есть всё для сетевого замка и песочницы"
 [ -x /usr/bin/ip ] || fail "не найден ip"
@@ -221,6 +240,8 @@ if [ "$MODE" = "update" ]; then
     for unit in de-screen de-agent de-keywatch de-traffic; do
         systemctl restart "$unit.service" >/dev/null 2>&1 || true
     done
+    systemctl start de-vault-sync.timer >/dev/null 2>&1 || true
+    /usr/local/sbin/de-vault sync >/dev/null 2>&1 || true
     say "готово"
     exit 0
 fi
@@ -234,6 +255,7 @@ for unit in de-cleanup de-screen de-agent de-keywatch de-traffic; do
     systemctl restart "$unit.service" >/dev/null 2>&1 || true
 done
 systemctl start de-update.timer >/dev/null 2>&1 || true
+systemctl start de-vault-sync.timer >/dev/null 2>&1 || true
 
 say "защищённые пользователи: $PROTECTED"
 say "готово, перезагружаюсь"

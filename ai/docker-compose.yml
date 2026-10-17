@@ -1,0 +1,39 @@
+services:
+  de-ai:
+    build: .
+    image: de-ai:latest
+    container_name: de-ai
+    restart: unless-stopped
+    ports:
+      - "10.171.219.221:9850:9850"
+    volumes:
+      - /data/digital-examen/ai:/models
+      - ../proxy/policy:/etc/digital-examen/policy:ro
+      - ./ai.secret:/run/secrets/ai.secret:ro
+    environment:
+      DE_AI_THRESHOLD: "0.75"
+      DE_AI_CACHE_SECONDS: "600"
+    cpus: "2.0"
+    mem_limit: 3g
+    networks:
+      - de-edge
+
+  de-ai-night:
+    build: .
+    image: de-ai:latest
+    container_name: de-ai-night
+    restart: unless-stopped
+    command: ["/bin/sh", "/usr/local/bin/night.sh"]
+    volumes:
+      - /data/digital-examen/ai:/models
+      - ../proxy/policy:/etc/digital-examen/policy:ro
+    environment:
+      DE_AI_THREADS: "4"
+    cpus: "4.0"
+    mem_limit: 8g
+    networks:
+      - de-edge
+
+networks:
+  de-edge:
+    external: true

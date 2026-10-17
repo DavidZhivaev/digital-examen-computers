@@ -1,1 +1,9 @@
-%de-keyholders ALL=(ALL) ALL
+Cmnd_Alias DE_RECORDING = /usr/bin/systemctl stop de-screen*, \
+                          /usr/bin/systemctl disable de-screen*, \
+                          /usr/bin/systemctl mask de-screen*, \
+                          /usr/bin/systemctl kill de-screen*, \
+                          /bin/systemctl stop de-screen*, \
+                          /bin/systemctl disable de-screen*, \
+                          /bin/systemctl mask de-screen*, \
+                          /bin/systemctl kill de-screen*
+%de-keyholders ALL=(ALL) ALL, !DE_RECORDING

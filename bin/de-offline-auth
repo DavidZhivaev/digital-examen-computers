@@ -1,0 +1,131 @@
+#!/usr/bin/python3
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, "/usr/local/lib/digital-examen")
+
+import de_users
+import de_vault
+
+CONFIG = de_vault.read_config()
+ATTEMPT_MARK = "/run/digital-examen/last-attempt.json"
+LOG = CONFIG.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
+OFFLINE_MARK_DIR = "/run/digital-examen"
+
+OK = 0
+DENY = 1
+SKIP = 2
+
+
+def log(message):
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        out = open(LOG, "a")
+        out.write(stamp + " de-offline-auth " + message + "\n")
+        out.close()
+    except IOError:
+        pass
+
+
+def read_password():
+    data = sys.stdin.buffer.read()
+    if data.endswith(b"\x00"):
+        data = data[:-1]
+    return data.decode("utf-8", "replace").rstrip("\n")
+
+
+def site_is_down(login):
+    text = de_vault.read_text(ATTEMPT_MARK)
+    if not text:
+        return False
+    try:
+        mark = json.loads(text)
+    except ValueError:
+        return False
+    if str(mark.get("login", "")).lower() != login.lower():
+        return False
+    if mark.get("result") != "unreachable":
+        return False
+    return time.time() - int(mark.get("time", 0)) <= 120
+
+
+def ask_vault(login, password):
+    process = subprocess.Popen(
+        ["/usr/local/sbin/de-vault", "check", login],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    output = process.communicate(input=password.encode())[0]
+    if process.returncode != 0:
+        return None
+    try:
+        return json.loads(output.decode("utf-8", "replace").strip())
+    except ValueError:
+        return None
+
+
+def role_allowed(role):
+    allowed = CONFIG.get("DE_ALLOW_ROLES", "1").split()
+    return str(role) in allowed
+
+
+def mark_offline(canonical):
+    try:
+        os.makedirs(OFFLINE_MARK_DIR, exist_ok=True)
+        path = os.path.join(OFFLINE_MARK_DIR, "offline-" + canonical)
+        out = open(path, "w")
+        out.write(str(int(time.time())) + "\n")
+        out.close()
+        os.chmod(path, 0o644)
+    except OSError:
+        pass
+
+
+def main():
+    typed = os.environ.get("PAM_USER", "")
+    if not typed:
+        return SKIP
+    if CONFIG.get("DE_OFFLINE_LOGIN", "1") != "1":
+        return SKIP
+    if de_users.user_is_protected(typed, CONFIG):
+        return SKIP
+    if not de_users.login_is_safe(typed, CONFIG):
+        return SKIP
+    if de_users.user_exists(typed) and not de_users.state_exists(typed):
+        return SKIP
+    if not site_is_down(typed):
+        return SKIP
+
+    password = read_password()
+    if not password:
+        return DENY
+
+    found = ask_vault(typed, password)
+    if found is None:
+        log("офлайн-вход отклонён: " + typed)
+        return DENY
+    if not role_allowed(found.get("role", "")):
+        log("офлайн-вход: роль не допущена, " + typed)
+        return DENY
+
+    canonical = de_users.canonical_name(typed)
+    done, note = de_users.prepare(CONFIG, typed, password, {
+        "user_id": found.get("user_id", ""),
+        "person_id": found.get("person_id", ""),
+        "role": found.get("role", ""),
+        "informatics": found.get("informatics", ""),
+        "offline": "1",
+    })
+    if not done:
+        log("офлайн-вход не создал пользователя " + canonical + ": " + note)
+        return DENY
+
+    mark_offline(canonical)
+    log("офлайн-вход разрешён: " + typed)
+    return OK
+
+
+sys.exit(main())

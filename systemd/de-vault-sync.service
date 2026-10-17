@@ -1,0 +1,7 @@
+[Unit]
+Description=Digital Examen выгрузка учёток для входа без интернета
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/de-vault sync

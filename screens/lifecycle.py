@@ -8,6 +8,8 @@ import time
 import urllib.error
 import urllib.request
 
+import space
+
 DATA_DIR = os.environ.get("DE_SCREEN_DATA", "/data/digital-examen/screens")
 RECODE = os.environ.get("DE_SCREEN_RECODE", "/usr/local/bin/recode.py")
 PYTHON = os.environ.get("DE_SCREEN_PYTHON", "/usr/bin/python3")
@@ -16,6 +18,7 @@ STORE_WIDTH = int(os.environ.get("DE_SCREEN_STORE_WIDTH", "1024"))
 STORE_HEIGHT = int(os.environ.get("DE_SCREEN_STORE_HEIGHT", "576"))
 
 DISK_LIMIT_GB = int(os.environ.get("DE_SCREEN_LIMIT_GB", "900"))
+MIN_FREE_GB = int(os.environ.get("DE_SCREEN_MIN_FREE_GB", "50"))
 NOTIFY_URL = os.environ.get("DE_NOTIFY_URL", "http://de-alerts:8099/notify")
 NOTIFY_SECRET_FILE = os.environ.get("DE_NOTIFY_SECRET_FILE", "/run/secrets/notify.secret")
 API_URL = os.environ.get("DE_API_URL", "")
@@ -195,11 +198,27 @@ def enforce_limit():
         )
 
 
+def enforce_free():
+    need = MIN_FREE_GB * 1024 ** 3
+    if space.free_bytes(DATA_DIR) >= need:
+        return
+    dropped = space.free_up(DATA_DIR, need, say, tell_site_dropped)
+    if dropped:
+        notify(
+            "<b>Записи экранов: на диске кончалось место</b>\n"
+            "Свободно должно быть %d ГБ, поэтому удалено самое старое: %s\n"
+            "Сейчас свободно %.1f ГБ."
+            % (MIN_FREE_GB, ", ".join(dropped[:10]),
+               space.free_bytes(DATA_DIR) / float(1024 ** 3))
+        )
+
+
 def main():
     if not os.path.isdir(DATA_DIR):
         return 0
     shrink_and_thin()
     enforce_limit()
+    enforce_free()
     return 0
 
 

@@ -8,6 +8,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import space
+
 DATA_DIR = os.environ.get("DE_SCREEN_DATA", "/data/digital-examen/screens")
 LIVE_DIR = os.environ.get("DE_SCREEN_LIVE", "/run/digital-examen/live")
 STATE_DIR = os.environ.get("DE_SCREEN_STATE", "/data/digital-examen/state")
@@ -16,7 +18,11 @@ PYTHON = os.environ.get("DE_SCREEN_PYTHON", "/usr/bin/python3")
 
 SECRET_FILE = os.environ.get("DE_SCREEN_SECRET", "/etc/digital-examen/proxy.secret")
 COMMAND_SECRET_FILE = os.environ.get("DE_COMMAND_SECRET", "")
+SECRETS_DIR = os.environ.get("DE_SECRETS_DIR", "/data/digital-examen/secrets")
+ALLOW_SHARED = os.environ.get("DE_ALLOW_SHARED_SECRET", "1") == "1"
 PORT = int(os.environ.get("DE_SCREEN_PORT", "9840"))
+MIN_FREE_GB = int(os.environ.get("DE_SCREEN_MIN_FREE_GB", "50"))
+SPACE_EVERY = int(os.environ.get("DE_SCREEN_SPACE_EVERY", "200"))
 CONSOLE_WAIT = int(os.environ.get("DE_CONSOLE_WAIT", "45"))
 
 WATCHED = {}
@@ -25,6 +31,7 @@ RESULTS = {}
 STATS = {}
 POLICY = {}
 COUNTER = {"value": 0}
+SPACE = {"frames": 0}
 LOCK = threading.Lock()
 
 
@@ -38,6 +45,39 @@ def read_command_secret():
     if COMMAND_SECRET_FILE and os.path.exists(COMMAND_SECRET_FILE):
         return open(COMMAND_SECRET_FILE).read().strip()
     return read_secret()
+
+
+def computer_secret(computer):
+    """Секрет именно этого компьютера.
+
+    Общий секрет на всю школу означал, что компьютер своим секретом мог
+    прочитать кадры соседнего. Теперь у каждой машины свой, сайт приносит
+    его сюда при постановке на учёт. Общий остаётся только как переходный,
+    пока все машины не переставлены (DE_ALLOW_SHARED_SECRET=0 его закрывает).
+    """
+    name = safe_name(computer)
+    path = os.path.join(SECRETS_DIR, name + ".json")
+    if not name or not os.path.exists(path):
+        return ""
+    try:
+        return str(json.loads(open(path).read()).get("screen", ""))
+    except (ValueError, OSError):
+        return ""
+
+
+def save_computer_secrets(computer, values):
+    name = safe_name(computer)
+    if not name:
+        return False
+    os.makedirs(SECRETS_DIR, exist_ok=True)
+    os.chmod(SECRETS_DIR, 0o700)
+    path = os.path.join(SECRETS_DIR, name + ".json")
+    out = open(path + ".new", "w")
+    out.write(json.dumps({"screen": str(values.get("screen", ""))}))
+    out.close()
+    os.chmod(path + ".new", 0o600)
+    os.replace(path + ".new", path)
+    return True
 
 
 def same(first, second):
@@ -165,6 +205,22 @@ def note_record(folder, header, written):
     out.close()
 
 
+def watch_space():
+    """Место кончается — удаляем самое старое, не переставая принимать.
+
+    Нельзя допустить, чтобы запись прекратилась из-за полного диска:
+    поэтому проверка идёт прямо в приёмнике, а не только ночью.
+    """
+    with LOCK:
+        SPACE["frames"] += 1
+        if SPACE["frames"] % SPACE_EVERY != 0:
+            return
+    need = MIN_FREE_GB * 1024 ** 3
+    if space.free_bytes(DATA_DIR) >= need:
+        return
+    space.free_up(DATA_DIR, need)
+
+
 def queue_command(computer, command):
     with LOCK:
         QUEUES.setdefault(safe_name(computer), []).append(command)
@@ -198,6 +254,17 @@ class Handler(BaseHTTPRequestHandler):
             return same(sent, read_command_secret())
         return same(sent, read_secret()) or same(sent, read_command_secret())
 
+    def allowed_computer(self, computer):
+        sent = self.headers.get("X-De-Secret", "")
+        own = computer_secret(computer)
+        if own and same(sent, own):
+            return True
+        if same(sent, read_command_secret()):
+            return True
+        if ALLOW_SHARED and same(sent, read_secret()):
+            return True
+        return False
+
     def body_json(self, limit=1024 * 1024):
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0 or length > limit:
@@ -215,8 +282,22 @@ class Handler(BaseHTTPRequestHandler):
             self.take_frame()
             return
 
+        if route == "/secrets":
+            if not self.allowed(True):
+                self.reply(403, {"error": "bad secret"})
+                return
+            payload = self.body_json()
+            if payload is None:
+                self.reply(400, {"error": "bad json"})
+                return
+            if not save_computer_secrets(payload.get("computer", ""), payload):
+                self.reply(400, {"error": "bad computer"})
+                return
+            self.reply(200, {"ok": True})
+            return
+
         if route == "/result":
-            if not self.allowed(False):
+            if not self.allowed_computer(self.headers.get("X-De-Computer", "")):
                 self.reply(403, {"error": "bad secret"})
                 return
             payload = self.body_json()
@@ -229,7 +310,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if route == "/stats":
-            if not self.allowed(False):
+            if not self.allowed_computer(self.headers.get("X-De-Computer", "")):
                 self.reply(403, {"error": "bad secret"})
                 return
             payload = self.body_json()
@@ -270,7 +351,7 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(404, {"error": "unknown path"})
 
     def take_frame(self):
-        if not self.allowed(False):
+        if not self.allowed_computer(self.headers.get("X-De-Computer", "")):
             self.reply(403, {"error": "bad secret"})
             return
 
@@ -303,6 +384,7 @@ class Handler(BaseHTTPRequestHandler):
             offset += size
 
         note_seen(header.get("computer", ""))
+        watch_space()
 
         try:
             if header.get("kind") == "live":
@@ -354,13 +436,16 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, {"ok": True})
             return
 
-        command_level = parts[0] in ("watch", "power", "record")
-        if not self.allowed(command_level):
-            self.reply(403, {"error": "bad secret"})
+        if parts[0] == "commands":
+            if not self.allowed_computer(query.get("computer", [""])[0]):
+                self.reply(403, {"error": "bad secret"})
+                return
+            self.long_poll(query)
             return
 
-        if parts[0] == "commands":
-            self.long_poll(query)
+        command_level = parts[0] in ("watch", "power", "record", "shot")
+        if not self.allowed(command_level):
+            self.reply(403, {"error": "bad secret"})
             return
 
         if parts[0] == "watch":

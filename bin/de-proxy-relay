@@ -73,6 +73,13 @@ BLOCKED = (
 )
 
 
+def url_from_head(head):
+    first = head.split("\r\n", 1)[0].split(" ")
+    if len(first) < 2:
+        return ""
+    return first[1][:600]
+
+
 def host_from_head(head):
     """Имя узла из первой строки запроса: CONNECT узел:порт или абсолютный адрес."""
     try:
@@ -244,7 +251,8 @@ class Handler(socketserver.BaseRequestHandler):
         note_visit(host, login)
 
         if POLICY is not None and host:
-            verdict = POLICY.decide(host, login, POLICY.read_policy(POLICY_FILE))
+            verdict = POLICY.decide(host, login, POLICY.read_policy(POLICY_FILE),
+                                    url=url_from_head(head[:split]))
             if verdict[0] == "block":
                 if verdict[2]:
                     note_block(host, login, verdict[1])

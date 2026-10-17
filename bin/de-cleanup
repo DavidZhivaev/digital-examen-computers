@@ -66,6 +66,7 @@ remove_user() {
     rm -rf "$box"
     rm -f "/run/digital-examen/login-$name"
     rm -f "/run/digital-examen/informatics-$name"
+    rm -f "/run/digital-examen/offline-$name"
 
     if [ -n "$home" ]; then
         mountpoint -q "$home" && umount "$home"

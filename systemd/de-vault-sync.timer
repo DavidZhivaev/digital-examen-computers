@@ -1,0 +1,11 @@
+[Unit]
+Description=Digital Examen обновление выгрузки учёток
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

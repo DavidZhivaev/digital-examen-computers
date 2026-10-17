@@ -9,6 +9,10 @@ import time
 import urllib.error
 import urllib.request
 
+sys.path.insert(0, "/usr/local/lib/digital-examen")
+
+import de_keys
+
 CONFIG_FILE = "/etc/digital-examen/computers.conf"
 LOGIN_FILE = "/run/digital-examen/current-login"
 STATE_FILE = "/run/digital-examen/key-holder"
@@ -39,7 +43,6 @@ KEY_FILE = CONFIG.get("DE_KEY_FILE", "de-key.txt")
 SUDO_GROUP = CONFIG.get("DE_KEY_SUDO_GROUP", "de-keyholders")
 POLL = int(CONFIG.get("DE_KEY_POLL", "5"))
 LOG = CONFIG.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
-MEDIA_DIRS = ("/run/media", "/media", "/mnt")
 
 
 def build_opener():
@@ -72,40 +75,11 @@ def read_file(path):
 
 
 def find_key():
-    """Путь к файлу ключа на подключённом сменном носителе.
-
-    Читается только файл с заранее известным именем в корне носителя. Ничего
-    не ищется рекурсивно и ничего, кроме этого файла, не открывается.
-    """
-    for base in MEDIA_DIRS:
-        if not os.path.isdir(base):
-            continue
-        for first in sorted(os.listdir(base)):
-            top = os.path.join(base, first)
-            candidate = os.path.join(top, KEY_FILE)
-            if os.path.isfile(candidate):
-                return candidate
-            if not os.path.isdir(top):
-                continue
-            for second in sorted(os.listdir(top)):
-                candidate = os.path.join(top, second, KEY_FILE)
-                if os.path.isfile(candidate):
-                    return candidate
-    return ""
+    return de_keys.find_key(KEY_FILE)
 
 
 def parse_key(path):
-    values = {}
-    try:
-        for line in open(path):
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            name, value = line.split("=", 1)
-            values[name.strip()] = value.strip()
-    except IOError:
-        return {}
-    return values
+    return de_keys.parse_key(path)
 
 
 def check_key(values):

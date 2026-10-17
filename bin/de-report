@@ -112,12 +112,15 @@ def main():
     if not API:
         return 0
 
+    offline_mark = os.path.join(STATE_DIR, "offline-" + sys.argv[2].lower())
+
     payload = {
         "event": sys.argv[1],
         "login": sys.argv[2],
         "computer": COMPUTER,
         "hostname": socket.gethostname(),
         "time": int(time.time()),
+        "offline": os.path.exists(offline_mark),
     }
 
     try:

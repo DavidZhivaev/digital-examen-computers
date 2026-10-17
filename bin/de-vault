@@ -1,0 +1,283 @@
+#!/usr/bin/python3
+
+import json
+import os
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.request
+
+sys.path.insert(0, "/usr/local/lib/digital-examen")
+
+import de_vault
+
+CONFIG = de_vault.read_config()
+API = CONFIG.get("DE_API_URL", "")
+COMPUTER = CONFIG.get("DE_COMPUTER_ID", "")
+PROXY_SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
+VAULT_SECRET_FILE = CONFIG.get("DE_VAULT_SECRET_FILE", "/etc/digital-examen/vault.secret")
+VAULT_DIR = CONFIG.get("DE_VAULT_DIR", "/var/lib/digital-examen/vault")
+BUNDLE_FILE = os.path.join(VAULT_DIR, "bundle.de")
+LOCAL_FILE = os.path.join(VAULT_DIR, "local.de")
+ATTEMPT_FILE = os.path.join(VAULT_DIR, "attempts.json")
+MAX_AGE_DAYS = int(CONFIG.get("DE_VAULT_MAX_AGE_DAYS", "30"))
+MAX_TRIES = int(CONFIG.get("DE_VAULT_MAX_TRIES", "10"))
+LOCK_MINUTES = int(CONFIG.get("DE_VAULT_LOCK_MINUTES", "30"))
+LOG = CONFIG.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
+TIMEOUT = int(CONFIG.get("DE_API_TIMEOUT", "10"))
+
+
+def log(message):
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        out = open(LOG, "a")
+        out.write(stamp + " de-vault " + message + "\n")
+        out.close()
+    except IOError:
+        pass
+
+
+def build_opener():
+    ca = CONFIG.get("DE_SCREEN_CA", "")
+    if not ca or not os.path.exists(ca):
+        return urllib.request.build_opener()
+    context = ssl.create_default_context(cafile=ca)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+
+
+OPENER = build_opener()
+
+
+def vault_secret():
+    return de_vault.read_text(VAULT_SECRET_FILE)
+
+
+def call(path, payload):
+    url = API.rstrip("/") + path
+    request = urllib.request.Request(url, data=json.dumps(payload).encode())
+    request.add_header("Content-Type", "application/json")
+    request.add_header("X-De-Computer", COMPUTER)
+    request.add_header("X-De-Secret", de_vault.read_text(PROXY_SECRET_FILE))
+    answer = OPENER.open(request, timeout=max(TIMEOUT, 30))
+    return answer.read().decode("utf-8")
+
+
+def read_password():
+    data = sys.stdin.buffer.read()
+    if data.endswith(b"\x00"):
+        data = data[:-1]
+    return data.decode("utf-8", "replace").rstrip("\n")
+
+
+def load_attempts():
+    text = de_vault.read_text(ATTEMPT_FILE)
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except ValueError:
+        return {}
+
+
+def save_attempts(values):
+    de_vault.write_private(ATTEMPT_FILE, json.dumps(values))
+
+
+def locked(login):
+    values = load_attempts()
+    edge = time.time() - LOCK_MINUTES * 60
+    tries = [item for item in values.get(login, []) if item > edge]
+    return len(tries) >= MAX_TRIES
+
+
+def note_failure(login):
+    values = load_attempts()
+    edge = time.time() - LOCK_MINUTES * 60
+    tries = [item for item in values.get(login, []) if item > edge]
+    tries.append(time.time())
+    values[login] = tries
+    save_attempts(values)
+
+
+def clear_failures(login):
+    values = load_attempts()
+    if login in values:
+        values.pop(login)
+        save_attempts(values)
+
+
+def local_accounts():
+    secret = vault_secret()
+    bundle = de_vault.load_bundle(LOCAL_FILE, secret)
+    if bundle is None:
+        return {"made": int(time.time()), "accounts": []}
+    return bundle
+
+
+def save_local(bundle):
+    secret = vault_secret()
+    if not secret:
+        return
+    bundle["made"] = int(time.time())
+    de_vault.write_private(LOCAL_FILE, de_vault.seal(secret, bundle))
+
+
+def remember(login, password, role="", informatics=""):
+    secret = vault_secret()
+    if not secret:
+        return 1
+
+    salt = os.urandom(16).hex()
+    verifier = de_vault.base_verifier(password, salt)
+    entry = {
+        "login": login.lower(),
+        "salt": salt,
+        "kdf": de_vault.DEFAULT_KDF,
+        "verifier": de_vault.bind_verifier(secret, verifier),
+        "updated": int(time.time()),
+        "source": "local",
+        "role": role,
+        "informatics": informatics,
+    }
+
+    bundle = local_accounts()
+    rest = [item for item in bundle.get("accounts", [])
+            if str(item.get("login", "")).lower() != login.lower()]
+    rest.append(entry)
+    bundle["accounts"] = rest[-200:]
+    save_local(bundle)
+
+    if not API or not COMPUTER:
+        return 0
+
+    try:
+        call("/api/computers/device/offline/push", {
+            "computer": COMPUTER,
+            "login": login.lower(),
+            "salt": salt,
+            "kdf": de_vault.DEFAULT_KDF,
+            "verifier": verifier,
+        })
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as error:
+        log("не отдал проверочное значение сайту: " + str(error))
+    return 0
+
+
+def sync():
+    secret = vault_secret()
+    if not secret or not API or not COMPUTER:
+        return 1
+    try:
+        blob = call("/api/computers/device/offline/bundle", {"computer": COMPUTER})
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as error:
+        log("выгрузка не получена: " + str(error))
+        return 1
+
+    if de_vault.unseal(secret, blob) is None:
+        log("выгрузка не прошла проверку подписи")
+        return 1
+
+    de_vault.write_private(BUNDLE_FILE, blob)
+    bundle = de_vault.load_bundle(BUNDLE_FILE, secret)
+    log("выгрузка обновлена, учёток %d" % len(bundle.get("accounts", [])))
+    return 0
+
+
+def entry_for(login):
+    secret = vault_secret()
+    bundle = de_vault.load_bundle(BUNDLE_FILE, secret)
+    if de_vault.bundle_fresh(bundle, MAX_AGE_DAYS):
+        found = de_vault.find_entry(bundle, login)
+        if found is not None:
+            return found, bundle
+    mine = de_vault.load_bundle(LOCAL_FILE, secret)
+    if de_vault.bundle_fresh(mine, MAX_AGE_DAYS):
+        found = de_vault.find_entry(mine, login)
+        if found is not None:
+            return found, mine
+    return None, None
+
+
+def check(login, password):
+    secret = vault_secret()
+    if not secret:
+        return 1
+
+    login = login.lower()
+    if locked(login):
+        log("офлайн-вход закрыт на %d минут: %s" % (LOCK_MINUTES, login))
+        return 1
+
+    entry, bundle = entry_for(login)
+    if entry is None:
+        note_failure(login)
+        return 1
+
+    if entry.get("revoked"):
+        log("учётка отозвана: " + login)
+        return 1
+
+    verifier = de_vault.base_verifier(password, entry["salt"], entry.get("kdf"))
+    if not de_vault.same(de_vault.bind_verifier(secret, verifier), entry.get("verifier", "")):
+        note_failure(login)
+        return 1
+
+    clear_failures(login)
+    sys.stdout.write(json.dumps({
+        "login": login,
+        "role": entry.get("role", ""),
+        "informatics": entry.get("informatics", ""),
+        "name": entry.get("name", ""),
+        "user_id": entry.get("user_id", ""),
+        "person_id": entry.get("person_id", ""),
+        "made": bundle.get("made", 0),
+    }) + "\n")
+    return 0
+
+
+def show():
+    secret = vault_secret()
+    bundle = de_vault.load_bundle(BUNDLE_FILE, secret)
+    mine = de_vault.load_bundle(LOCAL_FILE, secret)
+    sys.stdout.write(json.dumps({
+        "secret": bool(secret),
+        "bundle_accounts": len(bundle.get("accounts", [])) if bundle else 0,
+        "bundle_made": bundle.get("made", 0) if bundle else 0,
+        "bundle_fresh": de_vault.bundle_fresh(bundle, MAX_AGE_DAYS),
+        "local_accounts": len(mine.get("accounts", [])) if mine else 0,
+        "max_age_days": MAX_AGE_DAYS,
+    }, ensure_ascii=False) + "\n")
+    return 0
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.stderr.write("usage: de-vault <sync|remember LOGIN [РОЛЬ] [ИНФОРМАТИКА]|check LOGIN|show>\n")
+        return 2
+
+    os.makedirs(VAULT_DIR, exist_ok=True)
+    os.chmod(VAULT_DIR, 0o700)
+
+    action = sys.argv[1]
+    if action == "sync":
+        return sync()
+    if action == "show":
+        return show()
+    if action in ("remember", "check") and len(sys.argv) >= 3:
+        password = read_password()
+        if not password:
+            return 1
+        if action == "remember":
+            role = sys.argv[3] if len(sys.argv) > 3 else ""
+            informatics = sys.argv[4] if len(sys.argv) > 4 else ""
+            return remember(sys.argv[2], password, role, informatics)
+        return check(sys.argv[2], password)
+
+    sys.stderr.write("usage: de-vault <sync|remember LOGIN|check LOGIN|show>\n")
+    return 2
+
+
+sys.exit(main())

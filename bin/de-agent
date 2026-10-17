@@ -38,7 +38,7 @@ CONFIG = read_config()
 URL = CONFIG.get("DE_SCREEN_URL", "")
 API = CONFIG.get("DE_API_URL", "")
 COMPUTER = CONFIG.get("DE_COMPUTER_ID", "")
-SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
+SECRET_FILE = CONFIG.get("DE_SCREEN_SECRET_FILE", CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret"))
 MODE_FILE = CONFIG.get("DE_SCREEN_MODE_FILE", "/run/digital-examen/screen-mode")
 POLICY_FILE = CONFIG.get("DE_POLICY_FILE", "/run/digital-examen/policy.json")
 
