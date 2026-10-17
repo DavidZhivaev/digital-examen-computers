@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import socketserver
+import subprocess
 import sys
 import threading
 import time
@@ -95,6 +96,31 @@ def host_from_head(head):
     if target.startswith("["):
         return target[1:].split("]", 1)[0]
     return target.rsplit(":", 1)[0] if target.count(":") == 1 else target
+
+
+def note_block(host, login, group):
+    record = {
+        "kind": "block",
+        "value": host + " — " + group if group else host,
+        "at": int(time.time()),
+        "login": login,
+    }
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        client.sendto(json.dumps(record).encode(), TRAFFIC_SOCKET)
+        client.close()
+    except OSError:
+        pass
+
+
+def warn_user(host, group):
+    text = "Сайт %s закрыт ограничениями школы" % host
+    if group:
+        text += " (%s)" % group
+    subprocess.Popen(
+        ["notify-send", "Цифровой экзамен", text],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
 
 
 def note_visit(host, login):
@@ -220,6 +246,9 @@ class Handler(socketserver.BaseRequestHandler):
         if POLICY is not None and host:
             verdict = POLICY.decide(host, login, POLICY.read_policy(POLICY_FILE))
             if verdict[0] == "block":
+                if verdict[2]:
+                    note_block(host, login, verdict[1])
+                    warn_user(host, verdict[1])
                 client.sendall(BLOCKED)
                 return
 

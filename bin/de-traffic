@@ -77,7 +77,7 @@ def listen():
 
 def keep(record):
     line = json.dumps({
-        "kind": "command" if record.get("kind") == "command" else "site",
+        "kind": record.get("kind") if record.get("kind") in ("command", "block") else "site",
         "value": str(record.get("value", ""))[:MAX_VALUE],
         "at": int(record.get("at") or time.time()),
         "login": str(record.get("login", ""))[:255],
@@ -152,7 +152,7 @@ def by_login(entries):
         if not login:
             continue
         clean = {
-            "kind": "command" if item.get("kind") == "command" else "site",
+            "kind": item.get("kind") if item.get("kind") in ("command", "block") else "site",
             "value": str(item.get("value", ""))[:MAX_VALUE],
             "at": int(item.get("at", time.time())),
         }

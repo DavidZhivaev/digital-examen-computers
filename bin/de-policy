@@ -3,7 +3,6 @@
 import ipaddress
 import json
 import os
-import time
 
 POLICY_FILE = "/run/digital-examen/policy.json"
 STATE_DIR = "/var/lib/digital-examen/users"
