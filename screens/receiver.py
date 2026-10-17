@@ -4,6 +4,7 @@ import json
 import os
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 DATA_DIR = os.environ.get("DE_SCREEN_DATA", "/data/screens")
 SECRET_FILE = os.environ.get("DE_SCREEN_SECRET", "/etc/digital-examen/proxy.secret")
@@ -11,6 +12,7 @@ KEEP_DAYS = int(os.environ.get("DE_SCREEN_KEEP_DAYS", "10"))
 PORT = int(os.environ.get("DE_SCREEN_PORT", "9840"))
 
 MODES = {}
+QUEUES = {}
 
 
 def read_secret():
@@ -65,6 +67,11 @@ def store(header, blobs):
     latest.write(json.dumps(meta))
     latest.close()
 
+    if header.get("thumb"):
+        thumb = open(os.path.join(DATA_DIR, "thumb-" + login + ".webp"), "wb")
+        thumb.write(blobs[-1])
+        thumb.close()
+
 
 class Handler(BaseHTTPRequestHandler):
 
@@ -117,6 +124,10 @@ class Handler(BaseHTTPRequestHandler):
             blobs.append(body[offset:offset + size])
             offset += size
 
+        thumb_size = int(header.get("thumb", 0))
+        if thumb_size:
+            blobs.append(body[offset:offset + thumb_size])
+
         try:
             store(header, blobs)
         except OSError as error:
@@ -127,7 +138,62 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200, {"ok": True, "interval": MODES.get(login, 0)})
 
     def do_GET(self):
-        parts = self.path.strip("/").split("/")
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        parts = parsed.path.strip("/").split("/")
+
+        if parts[0] == "commands":
+            secret = read_secret()
+            if not secret or self.headers.get("X-De-Secret") != secret:
+                self.reply(403, {"error": "bad secret"})
+                return
+            login = safe_login(query.get("login", [""])[0])
+            wait = min(60, max(1, int(query.get("wait", ["25"])[0])))
+            if not login:
+                self.reply(400, {"error": "no login"})
+                return
+            deadline = time.time() + wait
+            while time.time() < deadline:
+                queue = QUEUES.get(login)
+                if queue:
+                    QUEUES[login] = []
+                    self.reply(200, {"commands": queue})
+                    return
+                time.sleep(0.5)
+            self.reply(200, {"commands": []})
+            return
+
+        if parts[0] == "command" and len(parts) == 2:
+            login = safe_login(parts[1])
+            name = query.get("name", [""])[0]
+            if not name:
+                self.reply(400, {"error": "no name"})
+                return
+            command = {"name": name}
+            if "interval" in query:
+                command["interval"] = int(query["interval"][0])
+            if "text" in query:
+                command["text"] = query["text"][0]
+            QUEUES.setdefault(login, []).append(command)
+            if name == "live":
+                MODES[login] = command.get("interval", 1)
+            if name == "archive":
+                MODES.pop(login, None)
+            self.reply(200, {"ok": True, "queued": command})
+            return
+
+        if parts[0] == "thumb" and len(parts) == 2:
+            path = os.path.join(DATA_DIR, "thumb-" + safe_login(parts[1]) + ".webp")
+            if not os.path.exists(path):
+                self.reply(404, {"error": "no thumb"})
+                return
+            data = open(path, "rb").read()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/webp")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
 
         if parts[0] == "latest" and len(parts) == 2:
             path = os.path.join(DATA_DIR, "latest-" + safe_login(parts[1]) + ".json")

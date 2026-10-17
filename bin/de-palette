@@ -1,0 +1,124 @@
+#!/usr/bin/python3
+
+import subprocess
+import sys
+
+
+def histogram(path, shrink):
+    command = [
+        "magick", path,
+        "-resize", shrink,
+        "-depth", "8",
+        "-format", "%c", "histogram:info:-",
+    ]
+    text = subprocess.check_output(command, stderr=subprocess.DEVNULL).decode("latin1")
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if ":" not in line or "(" not in line:
+            continue
+        count = line.split(":", 1)[0].strip()
+        if not count.isdigit():
+            continue
+        body = line[line.index("(") + 1:line.index(")")]
+        parts = body.split(",")
+        if len(parts) < 3:
+            continue
+        try:
+            red = int(float(parts[0]))
+            green = int(float(parts[1]))
+            blue = int(float(parts[2]))
+        except ValueError:
+            continue
+        out.append((int(count), red, green, blue))
+    return out
+
+
+def collapse(entries, step):
+    buckets = {}
+    for count, red, green, blue in entries:
+        key = (red // step, green // step, blue // step)
+        if key not in buckets:
+            buckets[key] = [0, 0, 0, 0]
+        slot = buckets[key]
+        slot[0] += count
+        slot[1] += red * count
+        slot[2] += green * count
+        slot[3] += blue * count
+    out = []
+    for slot in buckets.values():
+        total = slot[0]
+        out.append((total, slot[1] // total, slot[2] // total, slot[3] // total))
+    out.sort(reverse=True)
+    return out
+
+
+def distance(first, second):
+    red = first[0] - second[0]
+    green = first[1] - second[1]
+    blue = first[2] - second[2]
+    return 2 * red * red + 4 * green * green + 3 * blue * blue
+
+
+def choose(buckets, wanted, share):
+    if not buckets:
+        return [(0, 0, 0)]
+
+    total = sum(item[0] for item in buckets)
+    floor = total * share / 100.0
+
+    big = [item for item in buckets if item[0] >= floor]
+    if len(big) < wanted:
+        big = buckets[:max(wanted * 8, 32)]
+
+    picked = [(big[0][1], big[0][2], big[0][3])]
+
+    while len(picked) < wanted:
+        best = None
+        best_score = -1
+        for count, red, green, blue in big:
+            color = (red, green, blue)
+            if color in picked:
+                continue
+            near = min(distance(color, other) for other in picked)
+            if near > best_score:
+                best_score = near
+                best = color
+        if best is None:
+            break
+        picked.append(best)
+
+    return picked
+
+
+def write_palette(colors, path):
+    args = ["magick", "-size", "1x1"]
+    for red, green, blue in colors:
+        args += ["xc:rgb(%d,%d,%d)" % (red, green, blue)]
+    args += ["+append", path]
+    subprocess.check_call(args, stderr=subprocess.DEVNULL)
+
+
+def main():
+    if len(sys.argv) < 4:
+        sys.stderr.write("usage: de-palette <image> <colors> <palette.png> [shrink] [step]\n")
+        return 1
+
+    source = sys.argv[1]
+    wanted = int(sys.argv[2])
+    target = sys.argv[3]
+    shrink = sys.argv[4] if len(sys.argv) > 4 else "25%"
+    step = int(sys.argv[5]) if len(sys.argv) > 5 else 24
+    share = float(sys.argv[6]) if len(sys.argv) > 6 else 0.3
+
+    entries = histogram(source, shrink)
+    buckets = collapse(entries, step)
+    colors = choose(buckets, wanted, share)
+    write_palette(colors, target)
+
+    for red, green, blue in colors:
+        sys.stdout.write("#%02X%02X%02X\n" % (red, green, blue))
+    return 0
+
+
+sys.exit(main())

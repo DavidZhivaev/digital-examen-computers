@@ -38,7 +38,7 @@ chmod 0755 "$CONFIG_DIR"
 chmod 0700 "$STATE_DIR"
 
 say "ставлю скрипты в $BIN_DIR"
-for script in de-login-auth de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen; do
+for script in de-login-auth de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen de-agent de-palette; do
     install -m 0750 -o root -g root "$HERE/bin/$script" "$BIN_DIR/$script"
 done
 install -m 0755 -o root -g root "$HERE/bin/de-session-start" /usr/local/bin/de-session-start
@@ -151,12 +151,13 @@ if ! grep -q "notingroup $GROUP" /etc/pam.d/login; then
 fi
 
 say "ставлю службы"
-for unit in de-cleanup.service de-screen.service; do
+for unit in de-cleanup.service de-screen.service de-agent.service; do
     install -m 0644 -o root -g root "$HERE/systemd/$unit" "/etc/systemd/system/$unit"
 done
 systemctl daemon-reload
 systemctl enable de-cleanup.service
 systemctl enable de-screen.service
+systemctl enable de-agent.service
 
 say "проверяю, что есть всё для сетевого замка и песочницы"
 [ -x /usr/bin/ip ] || fail "не найден ip"

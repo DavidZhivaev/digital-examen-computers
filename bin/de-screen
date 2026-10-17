@@ -43,9 +43,40 @@ KEY_SHARE = int(CONFIG.get("DE_SCREEN_KEYFRAME_SHARE", "30"))
 WORK_DIR = CONFIG.get("DE_SCREEN_WORK_DIR", "/run/digital-examen/screen")
 SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
 
+INTERVAL_MIN = int(CONFIG.get("DE_SCREEN_INTERVAL_MIN", "1"))
+INTERVAL_MAX = int(CONFIG.get("DE_SCREEN_INTERVAL_MAX", "20"))
+BUDGET_KBITS = float(CONFIG.get("DE_SCREEN_BUDGET_KBITS", "12"))
+THUMB_WIDTH = int(CONFIG.get("DE_SCREEN_THUMB_WIDTH", "320"))
+THUMB_EVERY = int(CONFIG.get("DE_SCREEN_THUMB_EVERY", "4"))
+MODE_FILE = CONFIG.get("DE_SCREEN_MODE_FILE", "/run/digital-examen/screen-mode")
+
 COLS = WIDTH // TILE
 ROWS = HEIGHT // TILE
 RAW = os.path.join(WORK_DIR, "frame.rgb")
+
+
+def read_mode():
+    if not os.path.exists(MODE_FILE):
+        return 0
+    try:
+        return int(open(MODE_FILE).read().strip())
+    except ValueError:
+        return 0
+
+
+def budget_interval(recent):
+    if not recent:
+        return INTERVAL_MIN
+    average = sum(recent) / float(len(recent))
+    allowed = BUDGET_KBITS * 1000.0 / 8.0
+    if allowed <= 0:
+        return INTERVAL_MAX
+    wanted = average / allowed
+    if wanted < INTERVAL_MIN:
+        return INTERVAL_MIN
+    if wanted > INTERVAL_MAX:
+        return INTERVAL_MAX
+    return wanted
 
 
 def read_login():
@@ -114,9 +145,23 @@ def encode_full():
     return data
 
 
-def send(login, frame_no, keyframe, pieces):
+def encode_thumb():
+    path = os.path.join(WORK_DIR, "thumb.webp")
+    height = THUMB_WIDTH * HEIGHT // WIDTH
+    command = [
+        "magick", "-size", "%dx%d" % (WIDTH, HEIGHT), "-depth", "8", "rgb:" + RAW,
+        "-resize", "%dx%d!" % (THUMB_WIDTH, height),
+        "-quality", "40", "webp:" + path,
+    ]
+    subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    data = open(path, "rb").read()
+    os.remove(path)
+    return data
+
+
+def send(login, frame_no, keyframe, pieces, thumb):
     header = {
-        "version": 1,
+        "version": 2,
         "login": login,
         "frame": frame_no,
         "time": int(time.time()),
@@ -124,18 +169,20 @@ def send(login, frame_no, keyframe, pieces):
         "grid": [COLS, ROWS],
         "tile": TILE,
         "keyframe": keyframe,
+        "thumb": len(thumb),
         "pieces": [[index, len(blob)] for index, blob in pieces],
     }
     body = json.dumps(header).encode() + b"\n"
     for index, blob in pieces:
         body += blob
+    body += thumb
 
     request = urllib.request.Request(URL.rstrip("/") + "/frame", data=body)
     request.add_header("Content-Type", "application/octet-stream")
     request.add_header("X-De-Login", login)
     request.add_header("X-De-Secret", read_secret())
     answer = urllib.request.urlopen(request, timeout=20)
-    return json.loads(answer.read().decode("utf-8"))
+    return json.loads(answer.read().decode("utf-8")), len(body)
 
 
 def main():
@@ -148,7 +195,9 @@ def main():
     previous = None
     frame_no = 0
     since_key = 0
-    interval = int(CONFIG.get("DE_SCREEN_INTERVAL", "15"))
+    since_thumb = THUMB_EVERY
+    recent = []
+    interval = float(CONFIG.get("DE_SCREEN_INTERVAL", "3"))
     total = COLS * ROWS
 
     while True:
@@ -157,6 +206,7 @@ def main():
 
         if not login:
             previous = None
+            recent = []
             time.sleep(interval)
             continue
 
@@ -180,24 +230,28 @@ def main():
             keyframe = True
 
         pieces = []
+        thumb = b""
         try:
             if keyframe:
                 pieces = [[-1, encode_full()]]
             else:
                 for index in changed:
                     pieces.append([index, encode_tile(index)])
+            if since_thumb >= THUMB_EVERY:
+                thumb = encode_thumb()
         except (subprocess.CalledProcessError, OSError):
             time.sleep(interval)
             continue
 
-        if not pieces:
+        if not pieces and not thumb:
             previous = current
             since_key += 1
-            time.sleep(max(1, interval - (time.time() - started)))
+            since_thumb += 1
+            time.sleep(max(INTERVAL_MIN, interval - (time.time() - started)))
             continue
 
         try:
-            answer = send(login, frame_no, keyframe, pieces)
+            answer, sent = send(login, frame_no, keyframe, pieces, thumb)
         except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
             previous = None
             time.sleep(interval)
@@ -206,10 +260,20 @@ def main():
         previous = current
         frame_no += 1
         since_key = 0 if keyframe else since_key + 1
+        since_thumb = 0 if thumb else since_thumb + 1
 
-        wanted = answer.get("interval")
-        if wanted:
-            interval = max(1, int(wanted))
+        recent.append(sent)
+        if len(recent) > 3:
+            recent.pop(0)
+
+        live = read_mode()
+        if not live:
+            live = int(answer.get("interval") or 0)
+
+        if live > 0:
+            interval = max(INTERVAL_MIN, live)
+        else:
+            interval = budget_interval(recent)
 
         rest = interval - (time.time() - started)
         if rest > 0:
