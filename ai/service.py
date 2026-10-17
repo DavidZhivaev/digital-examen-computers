@@ -100,7 +100,7 @@ def classify(sample):
 
     machine = MACHINE[0]
     if machine is None:
-        return {"ai": total >= MARKER_SURE / 2, "confidence": round(min(0.6, total / MARKER_SURE), 3),
+        return {"ai": False, "confidence": round(min(0.6, total / MARKER_SURE), 3),
                 "quote": quote, "reason": "только признаки, модель не обучена", "model": False}
 
     rows = model.build_rows([{"host": host, "url": url, "title": title, "text": text}])
