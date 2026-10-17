@@ -75,7 +75,7 @@ def allowed_offline(found):
     вход без интернета не нужен и опаснее.
     """
     scope = str(found.get("scope", ""))
-    if scope.startswith("informatics-"):
+    if scope in ("teacher", "admin"):
         return True
     if scope == "student":
         return str(found.get("role", "")) in CONFIG.get("DE_ALLOW_ROLES", "1").split()
