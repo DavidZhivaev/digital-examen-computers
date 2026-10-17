@@ -1,4 +1,6 @@
 DE_API_URL="https://as.1580.ru"
+DE_REPO_DIR="/opt/digital-examen-computers"
+DE_REPO_BRANCH="main"
 DE_API_TIMEOUT="10"
 DE_DEVICE_NAME=""
 

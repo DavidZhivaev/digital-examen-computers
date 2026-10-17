@@ -5,6 +5,12 @@ set -e
 HERE=`dirname "$0"`
 HERE=`cd "$HERE" && pwd`
 
+MODE=install
+[ "$1" = "--update" ] && MODE=update
+
+REPO_DIR=/opt/digital-examen-computers
+REPO_URL=https://github.com/DavidZhivaev/digital-examen-computers.git
+
 CONFIG_DIR=/etc/digital-examen
 CONFIG_FILE=$CONFIG_DIR/computers.conf
 STATE_DIR=/var/lib/digital-examen/users
@@ -28,6 +34,24 @@ for tool in /usr/sbin/useradd /usr/sbin/userdel /usr/sbin/chpasswd /usr/bin/pyth
     [ -x "$tool" ] || fail "не найден $tool"
 done
 
+command -v git >/dev/null 2>&1 || fail "не найден git"
+
+if [ "$HERE" != "$REPO_DIR" ]; then
+    say "переношу репозиторий в $REPO_DIR"
+    if [ -d "$REPO_DIR/.git" ]; then
+        git -C "$REPO_DIR" remote set-url origin "$REPO_URL"
+        git -C "$REPO_DIR" fetch --quiet origin main || true
+        git -C "$REPO_DIR" reset --hard --quiet origin/main || true
+    else
+        rm -rf "$REPO_DIR"
+        git clone --quiet "$REPO_URL" "$REPO_DIR" || fail "не смог склонировать $REPO_URL"
+    fi
+    chown -R root:root "$REPO_DIR"
+    chmod -R go-w "$REPO_DIR"
+    say "продолжаю из $REPO_DIR"
+    exec /bin/sh "$REPO_DIR/setup.sh" "$@"
+fi
+
 [ -f /lib64/security/pam_exec.so ] || [ -f /usr/lib64/security/pam_exec.so ] || fail "не найден pam_exec.so"
 [ -f "$PAM_FILE" ] || fail "не найден $PAM_FILE"
 
@@ -38,7 +62,7 @@ chmod 0755 "$CONFIG_DIR"
 chmod 0700 "$STATE_DIR"
 
 say "ставлю скрипты в $BIN_DIR"
-for script in de-login-auth de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen de-agent de-palette de-report de-policy de-keywatch de-traffic de-init; do
+for script in de-login-auth de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen de-agent de-palette de-report de-policy de-keywatch de-traffic de-init de-update; do
     install -m 0750 -o root -g root "$HERE/bin/$script" "$BIN_DIR/$script"
 done
 install -m 0755 -o root -g root "$HERE/bin/de-session-start" /usr/local/bin/de-session-start
@@ -58,6 +82,10 @@ fi
 . "$CONFIG_FILE"
 GROUP="${DE_USER_GROUP:-de-students}"
 
+if [ "$MODE" = "update" ]; then
+    PROTECTED="${DE_PROTECTED_USERS:-root}"
+    say "обновление: список защищённых пользователей не трогаю"
+else
 say "защищаю всех существующих пользователей"
 EXISTING=`getent passwd | cut -d: -f1 | sort -u | tr '\n' ' '`
 PROTECTED=`echo "$EXISTING" | sed 's/  */ /g; s/^ //; s/ $//'`
@@ -67,6 +95,7 @@ echo "DE_PROTECTED_USERS=\"$PROTECTED\"" >> "$TMP_CONFIG"
 cat "$TMP_CONFIG" > "$CONFIG_FILE"
 rm -f "$TMP_CONFIG"
 chmod 0640 "$CONFIG_FILE"
+fi
 
 say "создаю каталог базы песочницы"
 mkdir -p "${DE_BOX_BASE:-/var/lib/digital-examen/box-base}"
@@ -162,7 +191,7 @@ if ! grep -q "notingroup $GROUP" /etc/pam.d/login; then
 fi
 
 say "ставлю службы"
-for unit in de-cleanup.service de-screen.service de-agent.service de-keywatch.service de-traffic.service; do
+for unit in de-cleanup.service de-screen.service de-agent.service de-keywatch.service de-traffic.service de-update.service de-update.timer; do
     install -m 0644 -o root -g root "$HERE/systemd/$unit" "/etc/systemd/system/$unit"
 done
 systemctl daemon-reload
@@ -171,6 +200,7 @@ systemctl enable de-screen.service
 systemctl enable de-agent.service
 systemctl enable de-keywatch.service
 systemctl enable de-traffic.service
+systemctl enable de-update.timer
 
 say "проверяю, что есть всё для сетевого замка и песочницы"
 [ -x /usr/bin/ip ] || fail "не найден ip"
@@ -186,14 +216,27 @@ say "проверяю конфиг sshd"
 /usr/sbin/sshd -t || fail "sshd не принял конфиг"
 systemctl reload sshd >/dev/null 2>&1 || true
 
-say "называю компьютер"
-if [ -n "$DE_API_URL" ] && [ -s "$SECRET_FILE" ]; then
-    /usr/bin/python3 "$BIN_DIR/de-init" || say "инициализация не завершена, запустите de-init позже"
-else
-    say "сначала впишите DE_API_URL и общий секрет прокси, затем запустите de-init"
+if [ "$MODE" = "update" ]; then
+    say "обновление применено, перезапускаю службы"
+    for unit in de-screen de-agent de-keywatch de-traffic; do
+        systemctl restart "$unit.service" >/dev/null 2>&1 || true
+    done
+    say "готово"
+    exit 0
 fi
 
-say "готово"
+say "ставлю компьютер на учёт"
+/usr/bin/python3 "$BIN_DIR/de-init" || fail "постановка на учёт не завершена, запустите de-init и повторите"
+
+say "перезапускаю службы"
+systemctl daemon-reload
+for unit in de-cleanup de-screen de-agent de-keywatch de-traffic; do
+    systemctl restart "$unit.service" >/dev/null 2>&1 || true
+done
+systemctl start de-update.timer >/dev/null 2>&1 || true
+
 say "защищённые пользователи: $PROTECTED"
-say "секрет прокси: $SECRET_FILE (должен совпадать с ШС)"
-say "перезагрузите компьютер"
+say "готово, перезагружаюсь"
+say "после перезагрузки на экране входа вводится логин и пароль с сайта"
+sleep 5
+systemctl reboot

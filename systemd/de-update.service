@@ -1,0 +1,7 @@
+[Unit]
+Description=Digital Examen обновление из репозитория
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/de-update

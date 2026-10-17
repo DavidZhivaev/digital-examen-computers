@@ -1,0 +1,98 @@
+#!/usr/bin/python3
+
+import os
+import subprocess
+import sys
+import time
+
+CONFIG_FILE = "/etc/digital-examen/computers.conf"
+
+
+def read_config():
+    values = {}
+    if not os.path.exists(CONFIG_FILE):
+        return values
+    data = open(CONFIG_FILE)
+    for line in data:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[name.strip()] = value
+    data.close()
+    return values
+
+
+CONFIG = read_config()
+REPO_DIR = CONFIG.get("DE_REPO_DIR", "/opt/digital-examen-computers")
+BRANCH = CONFIG.get("DE_REPO_BRANCH", "main")
+LOG = CONFIG.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
+
+
+def log(message):
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        out = open(LOG, "a")
+        out.write(stamp + " de-update " + message + "\n")
+        out.close()
+    except IOError:
+        pass
+
+
+def run(command):
+    try:
+        done = subprocess.run(command, cwd=REPO_DIR, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, timeout=300)
+        return done.returncode, done.stdout.decode("utf-8", "replace").strip()
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return 1, str(error)
+
+
+def head():
+    code, out = run(["git", "rev-parse", "HEAD"])
+    return out if code == 0 else ""
+
+
+def main():
+    if not os.path.isdir(os.path.join(REPO_DIR, ".git")):
+        return 0
+
+    before = head()
+
+    code, out = run(["git", "fetch", "--quiet", "origin", BRANCH])
+    if code != 0:
+        log("fetch не прошёл: " + out[:200])
+        return 0
+
+    code, out = run(["git", "reset", "--hard", "--quiet", "origin/" + BRANCH])
+    if code != 0:
+        log("reset не прошёл: " + out[:200])
+        return 0
+
+    after = head()
+    if after == before:
+        return 0
+
+    log("обновление %s -> %s, переустанавливаю" % (before[:8], after[:8]))
+
+    try:
+        done = subprocess.run(
+            ["/bin/sh", os.path.join(REPO_DIR, "setup.sh"), "--update"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        log("переустановка не запустилась: " + str(error))
+        return 0
+
+    if done.returncode != 0:
+        log("переустановка вернула код %d" % done.returncode)
+        return 0
+
+    log("обновление применено")
+    return 0
+
+
+sys.exit(main())

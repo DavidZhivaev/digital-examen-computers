@@ -5,13 +5,11 @@ import os
 import socket
 import ssl
 import sys
-import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 CONFIG_FILE = "/etc/digital-examen/computers.conf"
-KEY_NAME = "de-key.txt"
-MEDIA_DIRS = ("/run/media", "/media", "/mnt")
 
 
 def read_config():
@@ -33,21 +31,9 @@ def read_config():
 
 
 CONFIG = read_config()
-API = CONFIG.get("DE_API_URL", "")
-SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
-
-
-def build_opener():
-    ca = CONFIG.get("DE_SCREEN_CA", "")
-    if not ca or not os.path.exists(ca):
-        return urllib.request.build_opener()
-    context = ssl.create_default_context(cafile=ca)
-    context.check_hostname = True
-    context.verify_mode = ssl.CERT_REQUIRED
-    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
-
-
-OPENER = build_opener()
+API = CONFIG.get("DE_API_URL", "https://as.1580.ru")
+PROXY_SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
+COMMAND_SECRET_FILE = CONFIG.get("DE_COMMAND_SECRET_FILE", "/etc/digital-examen/command.secret")
 
 
 def say(message):
@@ -55,60 +41,16 @@ def say(message):
     sys.stdout.flush()
 
 
-def read_secret():
-    if not os.path.exists(SECRET_FILE):
-        return ""
-    return open(SECRET_FILE).read().strip()
-
-
-def find_key():
-    for base in MEDIA_DIRS:
-        if not os.path.isdir(base):
-            continue
-        for first in sorted(os.listdir(base)):
-            top = os.path.join(base, first)
-            candidate = os.path.join(top, KEY_NAME)
-            if os.path.isfile(candidate):
-                return candidate
-            if not os.path.isdir(top):
-                continue
-            for second in sorted(os.listdir(top)):
-                candidate = os.path.join(top, second, KEY_NAME)
-                if os.path.isfile(candidate):
-                    return candidate
-    return ""
-
-
-def parse_key(path):
-    values = {}
-    for line in open(path):
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        name, value = line.split("=", 1)
-        values[name.strip()] = value.strip()
-    return values
-
-
-def wait_for_key():
-    said = False
-    while True:
-        path = find_key()
-        if path:
-            return parse_key(path)
-        if not said:
-            say("Вставьте флешку с ключом (файл %s в корне) и подождите." % KEY_NAME)
-            say("Прервать — Ctrl+C.")
-            said = True
-        time.sleep(3)
-
-
-def post(path, payload):
-    body = json.dumps(payload).encode()
-    request = urllib.request.Request(API.rstrip("/") + path, data=body)
-    request.add_header("Content-Type", "application/json")
-    request.add_header("X-De-Secret", read_secret())
-    answer = OPENER.open(request, timeout=25)
+def call(path, payload=None, params=None):
+    url = API.rstrip("/") + path
+    if params:
+        url = url + "?" + urllib.parse.urlencode(params)
+    data = json.dumps(payload).encode() if payload is not None else None
+    request = urllib.request.Request(url, data=data)
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
+    context = ssl.create_default_context()
+    answer = urllib.request.urlopen(request, timeout=25, context=context)
     return json.loads(answer.read().decode("utf-8"))
 
 
@@ -116,40 +58,43 @@ def ask_number(question, low, high):
     while True:
         try:
             raw = input(question + ": ").strip()
-        except EOFError:
+        except (EOFError, KeyboardInterrupt):
             return None
         if not raw.isdigit():
             say("Нужно число от %d до %d." % (low, high))
             continue
         value = int(raw)
-        if value < low or value > high:
-            say("Нужно число от %d до %d." % (low, high))
-            continue
-        return value
+        if low <= value <= high:
+            return value
+        say("Нужно число от %d до %d." % (low, high))
 
 
-def write_config(name, room, corpus, number):
+def write_secret(path, value):
+    if not value:
+        return
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    out = open(path, "w")
+    out.write(value + "\n")
+    out.close()
+    os.chmod(path, 0o600)
+    os.chown(path, 0, 0)
+
+
+def write_config(values):
     lines = []
     seen = set()
-    wanted = {
-        "DE_COMPUTER_ID": name,
-        "DE_COMPUTER_CORPUS": str(corpus),
-        "DE_COMPUTER_ROOM": str(room),
-        "DE_COMPUTER_NUMBER": str(number),
-    }
-
     for line in open(CONFIG_FILE):
         key = line.split("=", 1)[0].strip()
-        if key in wanted:
-            lines.append('%s="%s"\n' % (key, wanted[key]))
+        if key in values:
+            lines.append('%s="%s"\n' % (key, values[key]))
             seen.add(key)
         else:
             lines.append(line)
-
-    for key, value in wanted.items():
+    for key, value in values.items():
         if key not in seen:
             lines.append('%s="%s"\n' % (key, value))
-
     out = open(CONFIG_FILE, "w")
     out.write("".join(lines))
     out.close()
@@ -157,74 +102,105 @@ def write_config(name, room, corpus, number):
 
 
 def main():
-    if not API:
-        say("В конфиге не указан DE_API_URL — впишите адрес сайта и повторите.")
-        return 1
-    if not read_secret():
-        say("Нет общего секрета в %s — впишите его и повторите." % SECRET_FILE)
+    if os.geteuid() != 0:
+        say("Запускать от root.")
         return 1
 
-    if CONFIG.get("DE_COMPUTER_ID"):
-        say("Компьютер уже назван %s." % CONFIG["DE_COMPUTER_ID"])
+    if not os.path.exists(CONFIG_FILE):
+        say("Нет %s — сначала отработает setup.sh." % CONFIG_FILE)
+        return 1
+
+    existing = CONFIG.get("DE_COMPUTER_ID", "")
+    if existing:
+        say("Компьютер уже поставлен на учёт как %s." % existing)
         try:
             again = input("Переназначить? [нет/да]: ").strip().lower()
-        except EOFError:
+        except (EOFError, KeyboardInterrupt):
             return 0
-        if again not in ("да", "y", "yes"):
+        if again not in ("да", "y", "yes", "д"):
             return 0
 
-    key = wait_for_key()
-    if not key.get("fingerprint") or not key.get("secret"):
-        say("Файл ключа не читается: нет fingerprint или secret.")
-        return 1
+    say("")
+    say("Постановка компьютера на учёт в системе «Компьютеры».")
+    say("Сайт: %s" % API)
+    say("")
+
+    while True:
+        corpus = ask_number("Номер корпуса", 1, 99)
+        if corpus is None:
+            say("Отменено.")
+            return 1
+        room = ask_number("Номер аудитории", 1, 9999)
+        if room is None:
+            say("Отменено.")
+            return 1
+        number = ask_number("Номер компьютера в аудитории", 1, 999)
+        if number is None:
+            say("Отменено.")
+            return 1
+
+        name = "%dk-%d-%d" % (corpus, room, number)
+
+        try:
+            busy = call("/api/computers/device/taken", None,
+                        {"corpus": corpus, "room": room, "number": number})
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as error:
+            say("Сайт не ответил: %s" % error)
+            return 1
+
+        if busy.get("taken") and busy.get("hostname") != socket.gethostname():
+            say("")
+            say("Место %s уже занято машиной %s." % (name, busy.get("hostname") or "с другим именем"))
+            say("Выберите другой номер.")
+            say("")
+            continue
+
+        say("")
+        say("Этот компьютер будет называться %s." % name)
+        try:
+            yes = input("Верно? [да/нет]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return 1
+        if yes in ("да", "y", "yes", "д", ""):
+            break
+        say("")
 
     try:
-        answer = post("/api/computers/device/key-check", {
-            "fingerprint": key["fingerprint"],
-            "secret": key["secret"],
-        })
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as error:
-        say("Сайт не ответил: %s" % error)
-        return 1
-
-    if not answer.get("ok"):
-        say("Ключ не принят: %s" % answer.get("reason", "неизвестная причина"))
-        return 1
-    if not answer.get("can_init"):
-        say("Ключ действителен, но инициализировать компьютеры им нельзя: %s"
-            % answer.get("reason", "нет прав"))
-        return 1
-
-    say("Ключ принят, владелец: %s" % answer.get("name", answer.get("login", "")))
-
-    corpus = ask_number("Номер корпуса", 1, 99)
-    room = ask_number("Номер аудитории", 1, 9999)
-    number = ask_number("Номер компьютера", 1, 999)
-    if corpus is None or room is None or number is None:
-        say("Отменено.")
-        return 1
-
-    try:
-        created = post("/api/computers/device/register", {
-            "fingerprint": key["fingerprint"],
-            "secret": key["secret"],
+        created = call("/api/computers/device/enroll", {
             "corpus": corpus,
             "room": room,
             "number": number,
             "hostname": socket.gethostname(),
         })
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as error:
-        say("Зарегистрировать не удалось: %s" % error)
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", "replace")
+        say("Сайт отказал: %s %s" % (error.code, body[:300]))
+        return 1
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        say("Сайт не ответил: %s" % error)
         return 1
 
-    name = created.get("computer", "")
-    if not name:
-        say("Сайт не вернул имя компьютера.")
-        return 1
+    write_secret(PROXY_SECRET_FILE, created.get("proxy_secret", ""))
+    write_secret(COMMAND_SECRET_FILE, created.get("command_secret", ""))
 
-    write_config(name, room, corpus, number)
-    say("Компьютер зарегистрирован как %s." % name)
-    say("Выньте флешку и перезагрузите компьютер.")
+    write_config({
+        "DE_COMPUTER_ID": created.get("computer", name),
+        "DE_COMPUTER_CORPUS": str(corpus),
+        "DE_COMPUTER_ROOM": str(room),
+        "DE_COMPUTER_NUMBER": str(number),
+        "DE_API_URL": API,
+        "DE_SCREEN_URL": created.get("screen_url", "https://as.1580.ru/screens"),
+    })
+
+    policy = created.get("policy")
+    if policy:
+        os.makedirs("/run/digital-examen", exist_ok=True)
+        out = open(CONFIG.get("DE_POLICY_FILE", "/run/digital-examen/policy.json"), "w")
+        out.write(json.dumps(policy))
+        out.close()
+
+    say("")
+    say("Готово. Компьютер зарегистрирован как %s." % created.get("computer", name))
     return 0
 
 
