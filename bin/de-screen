@@ -3,7 +3,6 @@
 import json
 import os
 import ssl
-import shutil
 import subprocess
 import sys
 import time
@@ -35,14 +34,29 @@ def read_config():
 
 CONFIG = read_config()
 URL = CONFIG.get("DE_SCREEN_URL", "")
-WIDTH = int(CONFIG.get("DE_SCREEN_WIDTH", "1280"))
-HEIGHT = int(CONFIG.get("DE_SCREEN_HEIGHT", "720"))
-TILE = int(CONFIG.get("DE_SCREEN_TILE", "80"))
+COMPUTER = CONFIG.get("DE_COMPUTER_ID", "")
+
+LIVE_WIDTH = int(CONFIG.get("DE_SCREEN_WIDTH", "1280"))
+LIVE_HEIGHT = int(CONFIG.get("DE_SCREEN_HEIGHT", "720"))
+STORE_WIDTH = int(CONFIG.get("DE_SCREEN_STORE_WIDTH", "1024"))
+STORE_HEIGHT = int(CONFIG.get("DE_SCREEN_STORE_HEIGHT", "576"))
+
+TILE = int(CONFIG.get("DE_SCREEN_TILE", "16"))
 QUALITY = CONFIG.get("DE_SCREEN_QUALITY", "50")
-KEY_EVERY = int(CONFIG.get("DE_SCREEN_KEYFRAME_EVERY", "40"))
-KEY_SHARE = int(CONFIG.get("DE_SCREEN_KEYFRAME_SHARE", "30"))
+COLORS = int(CONFIG.get("DE_SCREEN_COLORS", "8"))
+KEY_EVERY = int(CONFIG.get("DE_SCREEN_KEYFRAME_EVERY", "120"))
+KEY_SHARE = int(CONFIG.get("DE_SCREEN_KEYFRAME_SHARE", "40"))
+
+STORE_INTERVAL = float(CONFIG.get("DE_SCREEN_INTERVAL", "2"))
+WATCH_INTERVAL = float(CONFIG.get("DE_SCREEN_WATCH_INTERVAL", "2"))
+LIVE_INTERVAL = float(CONFIG.get("DE_SCREEN_LIVE_INTERVAL", "1"))
+
 WORK_DIR = CONFIG.get("DE_SCREEN_WORK_DIR", "/run/digital-examen/screen")
 SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
+MODE_FILE = CONFIG.get("DE_SCREEN_MODE_FILE", "/run/digital-examen/screen-mode")
+
+LIVE_RAW = os.path.join(WORK_DIR, "live.rgb")
+STORE_RAW = os.path.join(WORK_DIR, "store.rgb")
 
 
 def build_opener():
@@ -57,57 +71,19 @@ def build_opener():
 
 OPENER = build_opener()
 
-INTERVAL_MIN = int(CONFIG.get("DE_SCREEN_INTERVAL_MIN", "1"))
-INTERVAL_MAX = int(CONFIG.get("DE_SCREEN_INTERVAL_MAX", "20"))
-BUDGET_KBITS = float(CONFIG.get("DE_SCREEN_BUDGET_KBITS", "12"))
-THUMB_WIDTH = int(CONFIG.get("DE_SCREEN_THUMB_WIDTH", "320"))
-THUMB_EVERY = int(CONFIG.get("DE_SCREEN_THUMB_EVERY", "4"))
-MODE_FILE = CONFIG.get("DE_SCREEN_MODE_FILE", "/run/digital-examen/screen-mode")
-COLORS = int(CONFIG.get("DE_SCREEN_COLORS", "8"))
-PALETTE = os.path.join(CONFIG.get("DE_SCREEN_WORK_DIR", "/run/digital-examen/screen"), "palette.png")
 
-COLS = WIDTH // TILE
-ROWS = HEIGHT // TILE
-RAW = os.path.join(WORK_DIR, "frame.rgb")
+def read_file(path):
+    if not os.path.exists(path):
+        return ""
+    return open(path).read().strip()
 
 
 def read_mode():
-    if not os.path.exists(MODE_FILE):
-        return 0
+    value = read_file(MODE_FILE)
     try:
-        return int(open(MODE_FILE).read().strip())
+        return int(value)
     except ValueError:
         return 0
-
-
-def budget_interval(recent):
-    base = float(CONFIG.get("DE_SCREEN_INTERVAL", "3"))
-    if BUDGET_KBITS <= 0:
-        return base
-    if not recent:
-        return base
-    average = sum(recent) / float(len(recent))
-    allowed = BUDGET_KBITS * 1000.0 / 8.0
-    if allowed <= 0:
-        return base
-    wanted = average / allowed
-    if wanted < INTERVAL_MIN:
-        return INTERVAL_MIN
-    if wanted > INTERVAL_MAX:
-        return INTERVAL_MAX
-    return wanted
-
-
-def read_login():
-    if not os.path.exists(LOGIN_FILE):
-        return ""
-    return open(LOGIN_FILE).read().strip()
-
-
-def read_secret():
-    if not os.path.exists(SECRET_FILE):
-        return ""
-    return open(SECRET_FILE).read().strip()
 
 
 def grab():
@@ -115,218 +91,239 @@ def grab():
         "ffmpeg", "-loglevel", "error",
         "-f", "x11grab", "-i", os.environ.get("DISPLAY", ":0"),
         "-frames:v", "1",
-        "-vf", "scale=%d:%d" % (WIDTH, HEIGHT),
-        "-pix_fmt", "rgb24", "-f", "rawvideo", "-y", RAW,
+        "-vf", "scale=%d:%d" % (LIVE_WIDTH, LIVE_HEIGHT),
+        "-pix_fmt", "rgb24", "-f", "rawvideo", "-y", LIVE_RAW,
     ]
     subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return open(RAW, "rb").read()
+    return open(LIVE_RAW, "rb").read()
 
 
-def tile_hashes(data):
-    out = []
-    stride = WIDTH * 3
-    width_bytes = TILE * 3
-    for row in range(ROWS):
-        for col in range(COLS):
-            value = 0
-            left = col * width_bytes
-            for y in range(row * TILE, row * TILE + TILE):
-                start = y * stride + left
-                value = zlib.crc32(data[start:start + width_bytes], value)
-            out.append(value)
-    return out
-
-
-def palette_args():
-    if COLORS <= 0 or not os.path.exists(PALETTE):
-        return []
-    return ["+dither", "-remap", PALETTE]
-
-
-def make_palette():
-    if COLORS <= 0:
-        return
+def shrink():
     command = [
-        "magick", "-size", "%dx%d" % (WIDTH, HEIGHT), "-depth", "8", "rgb:" + RAW,
-        "-kmeans", str(COLORS), PALETTE,
+        "magick", "-size", "%dx%d" % (LIVE_WIDTH, LIVE_HEIGHT), "-depth", "8", "rgb:" + LIVE_RAW,
+        "-resize", "%dx%d!" % (STORE_WIDTH, STORE_HEIGHT),
+        "-depth", "8", "rgb:" + STORE_RAW,
     ]
     subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return open(STORE_RAW, "rb").read()
 
 
-def find_runs(changed):
-    marks = set(changed)
-    out = []
-    for row in range(ROWS):
-        col = 0
-        while col < COLS:
-            if row * COLS + col in marks:
-                start = col
-                while col < COLS and row * COLS + col in marks:
+class Stream:
+
+    def __init__(self, kind, width, height, raw):
+        self.kind = kind
+        self.raw = raw
+        self.palette = os.path.join(WORK_DIR, "palette-" + kind + ".png")
+        self.frame_no = 0
+        self.resize(width, height)
+
+    def resize(self, width, height):
+        self.width = width
+        self.height = height
+        self.cols = width // TILE
+        self.rows = height // TILE
+        self.total = self.cols * self.rows
+        self.reset()
+
+    def reset(self):
+        self.previous = None
+        self.since_key = 0
+
+    def hashes(self, data):
+        out = []
+        stride = self.width * 3
+        width_bytes = TILE * 3
+        for row in range(self.rows):
+            for col in range(self.cols):
+                value = 0
+                left = col * width_bytes
+                for y in range(row * TILE, row * TILE + TILE):
+                    start = y * stride + left
+                    value = zlib.crc32(data[start:start + width_bytes], value)
+                out.append(value)
+        return out
+
+    def palette_args(self):
+        if COLORS <= 0 or not os.path.exists(self.palette):
+            return []
+        return ["+dither", "-remap", self.palette]
+
+    def make_palette(self):
+        if COLORS <= 0:
+            return
+        command = [
+            "magick", "-size", "%dx%d" % (self.width, self.height),
+            "-depth", "8", "rgb:" + self.raw,
+            "-kmeans", str(COLORS), self.palette,
+        ]
+        subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def find_runs(self, changed):
+        marks = set(changed)
+        out = []
+        for row in range(self.rows):
+            col = 0
+            while col < self.cols:
+                if row * self.cols + col in marks:
+                    start = col
+                    while col < self.cols and row * self.cols + col in marks:
+                        col += 1
+                    out.append((start, row, col - start))
+                else:
                     col += 1
-                out.append((start, row, col - start))
-            else:
-                col += 1
-    return out
+        return out
+
+    def encode_run(self, run):
+        col, row, width = run
+        path = os.path.join(WORK_DIR, "%s-r%d_%d.webp" % (self.kind, col, row))
+        command = [
+            "magick", "-size", "%dx%d" % (self.width, self.height),
+            "-depth", "8", "rgb:" + self.raw,
+            "-crop", "%dx%d+%d+%d" % (width * TILE, TILE, col * TILE, row * TILE), "+repage",
+        ] + self.palette_args() + [
+            "-quality", QUALITY, "webp:" + path,
+        ]
+        subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        data = open(path, "rb").read()
+        os.remove(path)
+        return data
+
+    def encode_full(self):
+        path = os.path.join(WORK_DIR, self.kind + "-full.webp")
+        command = [
+            "magick", "-size", "%dx%d" % (self.width, self.height),
+            "-depth", "8", "rgb:" + self.raw,
+        ] + self.palette_args() + [
+            "-quality", QUALITY, "webp:" + path,
+        ]
+        subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        data = open(path, "rb").read()
+        os.remove(path)
+        return data
+
+    def build(self, data):
+        current = self.hashes(data)
+
+        if self.previous is None:
+            changed = list(range(self.total))
+        else:
+            changed = [i for i in range(self.total) if self.previous[i] != current[i]]
+
+        keyframe = self.previous is None or self.since_key >= KEY_EVERY
+        if len(changed) * 100 >= self.total * KEY_SHARE:
+            keyframe = True
+
+        if keyframe:
+            self.make_palette()
+            pieces = [[(-1, 0, 0), self.encode_full()]]
+        else:
+            pieces = [[run, self.encode_run(run)] for run in self.find_runs(changed)]
+
+        return current, keyframe, pieces
+
+    def header(self, login, keyframe, pieces):
+        return {
+            "version": 4,
+            "kind": self.kind,
+            "computer": COMPUTER,
+            "login": login,
+            "frame": self.frame_no,
+            "time": int(time.time()),
+            "size": [self.width, self.height],
+            "grid": [self.cols, self.rows],
+            "tile": TILE,
+            "keyframe": keyframe,
+            "pieces": [[run[0], run[1], run[2], len(blob)] for run, blob in pieces],
+        }
 
 
-def encode_run(run):
-    col, row, width = run
-    path = os.path.join(WORK_DIR, "r%d_%d.webp" % (col, row))
-    command = [
-        "magick", "-size", "%dx%d" % (WIDTH, HEIGHT), "-depth", "8", "rgb:" + RAW,
-        "-crop", "%dx%d+%d+%d" % (width * TILE, TILE, col * TILE, row * TILE), "+repage",
-    ] + palette_args() + [
-        "-quality", QUALITY, "webp:" + path,
-    ]
-    subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    data = open(path, "rb").read()
-    os.remove(path)
-    return data
-
-
-def encode_full():
-    path = os.path.join(WORK_DIR, "full.webp")
-    command = [
-        "magick", "-size", "%dx%d" % (WIDTH, HEIGHT), "-depth", "8", "rgb:" + RAW,
-    ] + palette_args() + [
-        "-quality", QUALITY, "webp:" + path,
-    ]
-    subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    data = open(path, "rb").read()
-    os.remove(path)
-    return data
-
-
-def encode_thumb():
-    path = os.path.join(WORK_DIR, "thumb.webp")
-    height = THUMB_WIDTH * HEIGHT // WIDTH
-    command = [
-        "magick", "-size", "%dx%d" % (WIDTH, HEIGHT), "-depth", "8", "rgb:" + RAW,
-        "-resize", "%dx%d!" % (THUMB_WIDTH, height),
-        "-quality", "40", "webp:" + path,
-    ]
-    subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    data = open(path, "rb").read()
-    os.remove(path)
-    return data
-
-
-def send(login, frame_no, keyframe, pieces, thumb):
-    header = {
-        "version": 3,
-        "login": login,
-        "frame": frame_no,
-        "time": int(time.time()),
-        "size": [WIDTH, HEIGHT],
-        "grid": [COLS, ROWS],
-        "tile": TILE,
-        "keyframe": keyframe,
-        "thumb": len(thumb),
-        "pieces": [[run[0], run[1], run[2], len(blob)] for run, blob in pieces],
-    }
-    body = json.dumps(header).encode() + b"\n"
+def send(stream, login, keyframe, pieces):
+    body = json.dumps(stream.header(login, keyframe, pieces)).encode() + b"\n"
     for run, blob in pieces:
         body += blob
-    body += thumb
 
     request = urllib.request.Request(URL.rstrip("/") + "/frame", data=body)
     request.add_header("Content-Type", "application/octet-stream")
+    request.add_header("X-De-Computer", COMPUTER)
     request.add_header("X-De-Login", login)
-    request.add_header("X-De-Secret", read_secret())
+    request.add_header("X-De-Secret", read_file(SECRET_FILE))
     answer = OPENER.open(request, timeout=20)
-    return json.loads(answer.read().decode("utf-8")), len(body)
+    return json.loads(answer.read().decode("utf-8"))
 
 
 def main():
-    if not URL:
+    if not URL or not COMPUTER:
         return 0
 
     os.makedirs(WORK_DIR, exist_ok=True)
     os.chmod(WORK_DIR, 0o700)
 
-    previous = None
-    frame_no = 0
-    since_key = 0
-    since_thumb = THUMB_EVERY
-    recent = []
-    interval = float(CONFIG.get("DE_SCREEN_INTERVAL", "3"))
-    total = COLS * ROWS
+    live = Stream("live", LIVE_WIDTH, LIVE_HEIGHT, LIVE_RAW)
+    store = Stream("store", STORE_WIDTH, STORE_HEIGHT, STORE_RAW)
+
+    watched = 0
+    next_store = 0.0
 
     while True:
         started = time.time()
-        login = read_login()
+        login = read_file(LOGIN_FILE)
 
         if not login:
-            previous = None
-            recent = []
-            time.sleep(interval)
+            store.reset()
+            time.sleep(STORE_INTERVAL)
             continue
 
         try:
-            data = grab()
+            raw = grab()
         except (subprocess.CalledProcessError, OSError):
-            time.sleep(interval)
+            time.sleep(STORE_INTERVAL)
             continue
 
-        current = tile_hashes(data)
+        answer = None
 
-        if previous is None:
-            changed = list(range(total))
+        if watched:
+            try:
+                live.make_palette()
+                pieces = [[(-1, 0, 0), live.encode_full()]]
+                answer = send(live, login, True, pieces)
+                live.frame_no += 1
+            except (subprocess.CalledProcessError, OSError, urllib.error.URLError,
+                    urllib.error.HTTPError, ValueError):
+                pass
+
+        if started >= next_store:
+            next_store = started + STORE_INTERVAL
+            try:
+                if watched:
+                    if store.width != LIVE_WIDTH:
+                        store.resize(LIVE_WIDTH, LIVE_HEIGHT)
+                    store.raw = LIVE_RAW
+                    frame = raw
+                else:
+                    if store.width != STORE_WIDTH:
+                        store.resize(STORE_WIDTH, STORE_HEIGHT)
+                    store.raw = STORE_RAW
+                    frame = shrink()
+                current, keyframe, pieces = store.build(frame)
+                if pieces:
+                    answer = send(store, login, keyframe, pieces)
+                    store.previous = current
+                    store.frame_no += 1
+                    store.since_key = 0 if keyframe else store.since_key + 1
+            except (subprocess.CalledProcessError, OSError, urllib.error.URLError,
+                    urllib.error.HTTPError, ValueError):
+                store.reset()
+
+        watched = read_mode()
+        if answer is not None and not watched:
+            watched = int(answer.get("interval") or 0)
+
+        if watched == 1:
+            interval = LIVE_INTERVAL
+        elif watched:
+            interval = WATCH_INTERVAL
         else:
-            changed = [i for i in range(total) if previous[i] != current[i]]
-
-        keyframe = False
-        if previous is None or since_key >= KEY_EVERY:
-            keyframe = True
-        if len(changed) * 100 >= total * KEY_SHARE:
-            keyframe = True
-
-        pieces = []
-        thumb = b""
-        try:
-            if keyframe:
-                make_palette()
-                pieces = [[(-1, 0, 0), encode_full()]]
-            else:
-                for run in find_runs(changed):
-                    pieces.append([run, encode_run(run)])
-            if since_thumb >= THUMB_EVERY:
-                thumb = encode_thumb()
-        except (subprocess.CalledProcessError, OSError):
-            time.sleep(interval)
-            continue
-
-        if not pieces and not thumb:
-            previous = current
-            since_key += 1
-            since_thumb += 1
-            time.sleep(max(INTERVAL_MIN, interval - (time.time() - started)))
-            continue
-
-        try:
-            answer, sent = send(login, frame_no, keyframe, pieces, thumb)
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
-            previous = None
-            time.sleep(interval)
-            continue
-
-        previous = current
-        frame_no += 1
-        since_key = 0 if keyframe else since_key + 1
-        since_thumb = 0 if thumb else since_thumb + 1
-
-        recent.append(sent)
-        if len(recent) > 3:
-            recent.pop(0)
-
-        live = read_mode()
-        if not live:
-            live = int(answer.get("interval") or 0)
-
-        if live > 0:
-            interval = max(INTERVAL_MIN, live)
-        else:
-            interval = budget_interval(recent)
+            interval = STORE_INTERVAL
 
         rest = interval - (time.time() - started)
         if rest > 0:

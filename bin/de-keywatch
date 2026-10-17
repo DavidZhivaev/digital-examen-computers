@@ -1,0 +1,205 @@
+#!/usr/bin/python3
+
+import json
+import os
+import ssl
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+CONFIG_FILE = "/etc/digital-examen/computers.conf"
+LOGIN_FILE = "/run/digital-examen/current-login"
+STATE_FILE = "/run/digital-examen/key-holder"
+
+
+def read_config():
+    values = {}
+    if not os.path.exists(CONFIG_FILE):
+        return values
+    data = open(CONFIG_FILE)
+    for line in data:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[name.strip()] = value
+    data.close()
+    return values
+
+
+CONFIG = read_config()
+API = CONFIG.get("DE_API_URL", "")
+SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
+KEY_FILE = CONFIG.get("DE_KEY_FILE", "de-key.txt")
+SUDO_GROUP = CONFIG.get("DE_KEY_SUDO_GROUP", "de-keyholders")
+POLL = int(CONFIG.get("DE_KEY_POLL", "5"))
+LOG = CONFIG.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
+MEDIA_DIRS = ("/run/media", "/media", "/mnt")
+
+
+def build_opener():
+    ca = CONFIG.get("DE_SCREEN_CA", "")
+    if not ca or not os.path.exists(ca):
+        return urllib.request.build_opener()
+    context = ssl.create_default_context(cafile=ca)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+
+
+OPENER = build_opener()
+
+
+def log(message):
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        out = open(LOG, "a")
+        out.write(stamp + " de-keywatch " + message + "\n")
+        out.close()
+    except IOError:
+        pass
+
+
+def read_file(path):
+    if not os.path.exists(path):
+        return ""
+    return open(path).read().strip()
+
+
+def find_key():
+    """Путь к файлу ключа на подключённом сменном носителе.
+
+    Читается только файл с заранее известным именем в корне носителя. Ничего
+    не ищется рекурсивно и ничего, кроме этого файла, не открывается.
+    """
+    for base in MEDIA_DIRS:
+        if not os.path.isdir(base):
+            continue
+        for first in sorted(os.listdir(base)):
+            top = os.path.join(base, first)
+            candidate = os.path.join(top, KEY_FILE)
+            if os.path.isfile(candidate):
+                return candidate
+            if not os.path.isdir(top):
+                continue
+            for second in sorted(os.listdir(top)):
+                candidate = os.path.join(top, second, KEY_FILE)
+                if os.path.isfile(candidate):
+                    return candidate
+    return ""
+
+
+def parse_key(path):
+    values = {}
+    try:
+        for line in open(path):
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, value = line.split("=", 1)
+            values[name.strip()] = value.strip()
+    except IOError:
+        return {}
+    return values
+
+
+def check_key(values):
+    if not API:
+        return {}
+    body = json.dumps({
+        "fingerprint": values.get("fingerprint", ""),
+        "secret": values.get("secret", ""),
+    }).encode()
+    request = urllib.request.Request(
+        API.rstrip("/") + "/api/computers/device/key-check", data=body)
+    request.add_header("Content-Type", "application/json")
+    request.add_header("X-De-Secret", read_file(SECRET_FILE))
+    try:
+        answer = OPENER.open(request, timeout=20)
+        return json.loads(answer.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+        return {}
+
+
+def in_group(login):
+    try:
+        output = subprocess.check_output(["/usr/bin/id", "-nG", login])
+    except (subprocess.CalledProcessError, OSError):
+        return False
+    return SUDO_GROUP in output.decode("utf-8", "replace").split()
+
+
+def grant(login):
+    if in_group(login):
+        return
+    subprocess.call(["/usr/sbin/usermod", "-a", "-G", SUDO_GROUP, login],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    out = open(STATE_FILE, "w")
+    out.write(login + "\n")
+    out.close()
+    os.chmod(STATE_FILE, 0o600)
+    log("sudo выдан " + login)
+
+
+def revoke(login):
+    if not in_group(login):
+        return
+    subprocess.call(["/usr/sbin/gpasswd", "-d", login, SUDO_GROUP],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if os.path.exists(STATE_FILE):
+        os.remove(STATE_FILE)
+    log("sudo забран у " + login)
+
+
+def main():
+    if not API:
+        return 0
+
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    holder = read_file(STATE_FILE)
+    if holder:
+        revoke(holder)
+
+    while True:
+        time.sleep(POLL)
+
+        login = read_file(LOGIN_FILE)
+        holder = read_file(STATE_FILE)
+        path = find_key()
+
+        if not path:
+            if holder:
+                revoke(holder)
+            continue
+
+        if not login:
+            if holder:
+                revoke(holder)
+            continue
+
+        if holder == login:
+            continue
+
+        values = parse_key(path)
+        if not values.get("fingerprint") or not values.get("secret"):
+            continue
+
+        answer = check_key(values)
+        if not answer.get("ok") or not answer.get("sudo"):
+            continue
+
+        owner = str(answer.get("login", "")).lower()
+        if owner != login.lower():
+            continue
+
+        if holder:
+            revoke(holder)
+        grant(login)
+
+
+sys.exit(main())

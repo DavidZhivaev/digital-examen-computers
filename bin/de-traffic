@@ -1,0 +1,185 @@
+#!/usr/bin/python3
+
+import json
+import os
+import socket
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+
+CONFIG_FILE = "/etc/digital-examen/computers.conf"
+LOGIN_FILE = "/run/digital-examen/current-login"
+
+
+def read_config():
+    values = {}
+    if not os.path.exists(CONFIG_FILE):
+        return values
+    data = open(CONFIG_FILE)
+    for line in data:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[name.strip()] = value
+    data.close()
+    return values
+
+
+CONFIG = read_config()
+API = CONFIG.get("DE_API_URL", "")
+COMPUTER = CONFIG.get("DE_COMPUTER_ID", "")
+SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
+QUEUE = CONFIG.get("DE_TRAFFIC_QUEUE", "/run/digital-examen/traffic-queue.jsonl")
+SOCKET_PATH = CONFIG.get("DE_TRAFFIC_SOCKET", "/run/digital-examen/traffic.sock")
+FLUSH = int(CONFIG.get("DE_TRAFFIC_FLUSH", "60"))
+MAX_PER_FLUSH = int(CONFIG.get("DE_TRAFFIC_MAX_PER_FLUSH", "2000"))
+MAX_VALUE = 255
+
+
+def listen():
+    """Сбор записей через сокет, а не через общий файл.
+
+    Домены пишет релей от root, а команды консоли — сам вошедший. Если бы
+    они писали в один файл, ученик мог бы этот файл обрезать и стереть свой
+    же журнал. Сокет только принимает: удалить из него уже отправленное
+    нельзя, а сам журнал лежит под root и ученику не виден.
+    """
+    try:
+        os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
+        if os.path.exists(SOCKET_PATH):
+            os.remove(SOCKET_PATH)
+    except OSError:
+        return
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    server.bind(SOCKET_PATH)
+    os.chmod(SOCKET_PATH, 0o222)
+
+    while True:
+        try:
+            data = server.recv(4096)
+        except OSError:
+            continue
+        try:
+            record = json.loads(data.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        keep(record)
+
+
+def keep(record):
+    line = json.dumps({
+        "kind": "command" if record.get("kind") == "command" else "site",
+        "value": str(record.get("value", ""))[:MAX_VALUE],
+        "at": int(record.get("at") or time.time()),
+        "login": str(record.get("login", ""))[:255],
+    })
+    try:
+        os.makedirs(os.path.dirname(QUEUE), exist_ok=True)
+        out = open(QUEUE, "a")
+        out.write(line + "\n")
+        out.close()
+        os.chmod(QUEUE, 0o600)
+    except IOError:
+        pass
+
+
+def read_file(path):
+    if not os.path.exists(path):
+        return ""
+    return open(path).read().strip()
+
+
+def post(entries, login):
+    body = json.dumps({
+        "computer": COMPUTER,
+        "login": login,
+        "entries": entries,
+    }).encode()
+    request = urllib.request.Request(
+        API.rstrip("/") + "/api/computers/device/traffic", data=body)
+    request.add_header("Content-Type", "application/json")
+    request.add_header("X-De-Computer", COMPUTER)
+    request.add_header("X-De-Secret", read_file(SECRET_FILE))
+    urllib.request.urlopen(request, timeout=25).read()
+
+
+def take_queue():
+    if not os.path.exists(QUEUE):
+        return []
+    temporary = QUEUE + ".sending"
+    try:
+        os.replace(QUEUE, temporary)
+    except OSError:
+        return []
+
+    out = []
+    for line in open(temporary):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    os.remove(temporary)
+    return out
+
+
+def give_back(entries):
+    try:
+        os.makedirs(os.path.dirname(QUEUE), exist_ok=True)
+        out = open(QUEUE, "a")
+        for item in entries:
+            out.write(json.dumps(item) + "\n")
+        out.close()
+    except IOError:
+        pass
+
+
+def by_login(entries):
+    groups = {}
+    for item in entries:
+        login = str(item.get("login", "")) or read_file(LOGIN_FILE)
+        if not login:
+            continue
+        clean = {
+            "kind": "command" if item.get("kind") == "command" else "site",
+            "value": str(item.get("value", ""))[:MAX_VALUE],
+            "at": int(item.get("at", time.time())),
+        }
+        if clean["value"]:
+            groups.setdefault(login, []).append(clean)
+    return groups
+
+
+def main():
+    if not API or not COMPUTER:
+        return 0
+
+    threading.Thread(target=listen, daemon=True).start()
+
+    while True:
+        entries = take_queue()
+        if entries:
+            left = entries[MAX_PER_FLUSH:]
+            entries = entries[:MAX_PER_FLUSH]
+            failed = []
+            for login, items in by_login(entries).items():
+                try:
+                    post(items, login)
+                except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+                    failed += [dict(item, login=login) for item in items]
+            give_back(failed + left)
+        time.sleep(FLUSH)
+
+
+sys.exit(main())

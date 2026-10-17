@@ -1,0 +1,12 @@
+[Unit]
+Description=Digital Examen de-keywatch
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/de-keywatch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

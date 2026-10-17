@@ -136,6 +136,33 @@ def ask_login(config, login, password, challenge):
     return post_json(url, body, timeout)
 
 
+def ask_informatics(config, login):
+    """Состоит ли человек в предмете «Информатика» и в каком качестве.
+
+    Нужно сеансу: администратор информатики работает БЕЗ песочницы, остальные
+    в ней. Ответ сайта («admin», «teacher» или пусто) кладётся в состояние
+    пользователя, оттуда его читают de-session-start и de-policy.
+    """
+    url = config.get("DE_API_URL", "").rstrip("/") + "/api/computers/device/person"
+    timeout = int(config.get("DE_API_TIMEOUT", "10"))
+    secret_file = config.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
+    secret = ""
+    if os.path.exists(secret_file):
+        secret = open(secret_file).read().strip()
+    if not secret:
+        return ""
+
+    data = json.dumps({"login": login}).encode()
+    request = urllib.request.Request(url, data=data)
+    request.add_header("Content-Type", "application/json")
+    request.add_header("X-De-Secret", secret)
+    try:
+        answer = urllib.request.urlopen(request, timeout=timeout)
+        return str(json.loads(answer.read().decode("utf-8")).get("informatics", ""))
+    except Exception:
+        return ""
+
+
 def token_payload(token):
     parts = token.split(".")
     if len(parts) != 3:
@@ -249,7 +276,7 @@ def create_user(config, login, password):
     return True, ""
 
 
-def save_state(canonical, typed, payload):
+def save_state(canonical, typed, payload, informatics=""):
     if not os.path.isdir(STATE_DIR):
         os.makedirs(STATE_DIR, 0o700)
     alias = ""
@@ -264,12 +291,35 @@ def save_state(canonical, typed, payload):
         "user_id=" + str(payload.get("sub", "")),
         "person_id=" + str(payload.get("person_id", "")),
         "role=" + str(payload.get("role", "")),
+        "informatics=" + informatics,
     ]
     path = os.path.join(STATE_DIR, canonical)
     out = open(path, "w")
     out.write("\n".join(lines) + "\n")
     out.close()
     os.chmod(path, 0o600)
+
+    save_session_mark(canonical, informatics)
+
+
+def save_session_mark(canonical, informatics):
+    """Пометка для сеанса: читать её должен сам вошедший.
+
+    Состояние в /var/lib доступно только root, а решение «запускать сеанс в
+    песочнице или нет» принимает de-session-start уже от имени пользователя.
+    Поэтому в /run кладётся отдельный файл, в котором нет ничего, кроме этого
+    одного слова.
+    """
+    folder = "/run/digital-examen"
+    try:
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, "informatics-" + canonical)
+        out = open(path, "w")
+        out.write(informatics + "\n")
+        out.close()
+        os.chmod(path, 0o644)
+    except OSError:
+        pass
 
 
 def state_exists(login):
@@ -341,7 +391,7 @@ def main():
             log(config, "chpasswd failed for " + name + ": " + output)
             return DENY
 
-    save_state(canonical, typed, payload)
+    save_state(canonical, typed, payload, ask_informatics(config, canonical))
     log(config, "login ok as " + typed)
     return OK
 

@@ -1,0 +1,35 @@
+#!/bin/sh
+
+LINE="$1"
+[ -n "$LINE" ] || exit 0
+
+exec /usr/bin/python3 - "$LINE" <<'PY'
+import json
+import os
+import socket
+import sys
+import time
+
+SOCKET_PATH = "/run/digital-examen/traffic.sock"
+LOGIN_FILE = "/run/digital-examen/current-login"
+
+line = sys.argv[1].strip()[:255]
+if not line:
+    sys.exit(0)
+
+login = ""
+if os.path.exists(LOGIN_FILE):
+    login = open(LOGIN_FILE).read().strip()
+if not login:
+    import pwd
+    login = pwd.getpwuid(os.getuid()).pw_name
+
+record = {"kind": "command", "value": line, "at": int(time.time()), "login": login}
+
+try:
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    client.sendto(json.dumps(record).encode(), SOCKET_PATH)
+    client.close()
+except OSError:
+    pass
+PY

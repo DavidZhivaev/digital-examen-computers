@@ -9,6 +9,45 @@ services:
     volumes:
       - /data/digital-examen/screens:/data/screens
       - ./proxy.secret:/etc/digital-examen/proxy.secret:ro
+      - ./command.secret:/etc/digital-examen/command.secret:ro
+    environment:
+      DE_COMMAND_SECRET: /etc/digital-examen/command.secret
+    networks:
+      - de-edge
+
+  # Ночной обход: урезание 720p до 1024x576, лестница прореживания, удаление
+  # записей старше четырёх недель и соблюдение лимита в 900 ГБ. Отдельный
+  # контейнер, потому что работа тяжёлая и не должна мешать приёму кадров.
+  de-screens-night:
+    build: .
+    image: de-screens:latest
+    container_name: de-screens-night
+    restart: unless-stopped
+    command: ["/bin/sh", "/usr/local/bin/night.sh"]
+    volumes:
+      - /data/digital-examen/screens:/data/screens
+      - ./proxy.secret:/run/secrets/proxy.secret:ro
+      - ./notify.secret:/run/secrets/notify.secret:ro
+    environment:
+      DE_API_URL: "${DE_API_URL:-https://examen.1580.ru}"
+      DE_NOTIFY_URL: "http://de-alerts:8099/notify"
+      DE_SCREEN_LIMIT_GB: "900"
+    networks:
+      - de-edge
+
+  # Опись записей для сайта: какие записи есть, сколько занимают и сколько
+  # длятся. Сам приёмник сайту не звонит — у него на руках только кадры.
+  de-screens-report:
+    build: .
+    image: de-screens:latest
+    container_name: de-screens-report
+    restart: unless-stopped
+    command: ["/bin/sh", "/usr/local/bin/report-loop.sh"]
+    volumes:
+      - /data/digital-examen/screens:/data/screens:ro
+      - ./proxy.secret:/run/secrets/proxy.secret:ro
+    environment:
+      DE_API_URL: "${DE_API_URL:-https://examen.1580.ru}"
     networks:
       - de-edge
 

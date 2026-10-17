@@ -1,0 +1,129 @@
+#!/usr/bin/python3
+
+import ipaddress
+import json
+import os
+import time
+
+POLICY_FILE = "/run/digital-examen/policy.json"
+STATE_DIR = "/var/lib/digital-examen/users"
+
+
+def read_policy(path=POLICY_FILE):
+    if not os.path.exists(path):
+        return {"groups": []}
+    try:
+        return json.loads(open(path).read())
+    except ValueError:
+        return {"groups": []}
+
+
+def read_person(login):
+    path = os.path.join(STATE_DIR, login)
+    values = {}
+    if not os.path.exists(path):
+        return values
+    for line in open(path):
+        line = line.strip()
+        if "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        values[name] = value
+    return values
+
+
+def person_role(login):
+    try:
+        return int(read_person(login).get("role", "0") or 0)
+    except ValueError:
+        return 0
+
+
+def person_informatics(login):
+    return read_person(login).get("informatics", "")
+
+
+def host_matches(pattern, host):
+    pattern = pattern.strip().lower()
+    host = host.strip().lower().rstrip(".")
+    if not pattern or not host:
+        return False
+    if pattern == "*":
+        return True
+    if pattern.startswith("*."):
+        tail = pattern[2:]
+        return host == tail or host.endswith("." + tail)
+    return host == pattern
+
+
+def address_matches(pattern, host):
+    try:
+        network = ipaddress.ip_network(pattern, strict=False)
+    except ValueError:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address in network
+
+
+def matches(pattern, host):
+    if any(char.isdigit() for char in pattern.split("/")[0].replace(".", "")) and "/" in pattern:
+        return address_matches(pattern, host)
+    if address_matches(pattern, host):
+        return True
+    return host_matches(pattern, host)
+
+
+def list_hits(lines, host):
+    """(попал, это исключение) по списку шаблонов.
+
+    Строка с «!» впереди — исключение: она отменяет попадание остальных строк
+    того же списка. Поэтому исключения проверяются первыми.
+    """
+    plain = []
+    exceptions = []
+    for line in lines or []:
+        line = str(line).strip()
+        if not line:
+            continue
+        if line.startswith("!"):
+            exceptions.append(line[1:].strip())
+        else:
+            plain.append(line)
+
+    for pattern in exceptions:
+        if matches(pattern, host):
+            return False
+    for pattern in plain:
+        if matches(pattern, host):
+            return True
+    return False
+
+
+def decide(host, login, policy=None):
+    """«pass» или «block» плюс название группы, из-за которой решение принято.
+
+    Учитель и выше ограничениями не связан: подсистема сделана для учеников,
+    а урок ведёт человек, которому нужен весь интернет.
+    """
+    if person_role(login) >= 2:
+        return "pass", "", False
+
+    if policy is None:
+        policy = read_policy()
+
+    groups = sorted(policy.get("groups", []), key=lambda item: -int(item.get("priority", 50)))
+
+    for group in groups:
+        if list_hits(group.get("always_allow"), host):
+            return "pass", group.get("name", ""), False
+
+        if group.get("principle") == "allow":
+            return "block", group.get("name", ""), bool(group.get("notify"))
+
+        if list_hits(group.get("denied"), host):
+            return "block", group.get("name", ""), bool(group.get("notify"))
+
+    return "pass", "", False

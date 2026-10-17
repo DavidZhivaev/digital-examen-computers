@@ -1,11 +1,14 @@
 #!/usr/bin/python3
 
 import base64
+import importlib.util
+import json
 import os
 import socket
 import socketserver
 import sys
 import threading
+import time
 
 CONFIG_FILE = "/etc/digital-examen/computers.conf"
 LOGIN_FILE = "/run/digital-examen/current-login"
@@ -37,6 +40,91 @@ UP_HOST = CONFIG.get("DE_SCHOOL_PROXY_HOST", "")
 UP_FALLBACK = CONFIG.get("DE_SCHOOL_PROXY_FALLBACK", "")
 UP_PORT = int(CONFIG.get("DE_SCHOOL_PROXY_PORT", "3128"))
 SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
+TRAFFIC_SOCKET = CONFIG.get("DE_TRAFFIC_SOCKET", "/run/digital-examen/traffic.sock")
+POLICY_FILE = CONFIG.get("DE_POLICY_FILE", "/run/digital-examen/policy.json")
+POLICY_MODULE = CONFIG.get("DE_POLICY_MODULE", "/usr/local/sbin/de-policy")
+SEEN_SECONDS = int(CONFIG.get("DE_TRAFFIC_SEEN_SECONDS", "300"))
+
+SEEN = {}
+SEEN_LOCK = threading.Lock()
+
+
+def load_policy_module():
+    spec = importlib.util.spec_from_loader("de_policy", loader=None)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        source = open(POLICY_MODULE).read()
+    except IOError:
+        return None
+    exec(compile(source, POLICY_MODULE, "exec"), module.__dict__)
+    return module
+
+
+POLICY = load_policy_module()
+
+
+BLOCKED_BODY = "Закрыто ограничениями школы\n".encode("utf-8")
+BLOCKED = (
+    b"HTTP/1.1 403 Forbidden\r\n"
+    b"Content-Type: text/plain; charset=utf-8\r\n"
+    b"Content-Length: " + str(len(BLOCKED_BODY)).encode() + b"\r\n"
+    b"Connection: close\r\n\r\n" + BLOCKED_BODY
+)
+
+
+def host_from_head(head):
+    """Имя узла из первой строки запроса: CONNECT узел:порт или абсолютный адрес."""
+    try:
+        line = head.split(b"\r\n", 1)[0].decode("latin-1")
+    except (IndexError, UnicodeDecodeError):
+        return ""
+
+    parts = line.split()
+    if len(parts) < 2:
+        return ""
+
+    target = parts[1]
+    if parts[0].upper() == "CONNECT":
+        return target.rsplit(":", 1)[0].strip("[]")
+
+    if "://" in target:
+        target = target.split("://", 1)[1]
+    target = target.split("/", 1)[0]
+    if "@" in target:
+        target = target.rsplit("@", 1)[1]
+    if target.startswith("["):
+        return target[1:].split("]", 1)[0]
+    return target.rsplit(":", 1)[0] if target.count(":") == 1 else target
+
+
+def note_visit(host, login):
+    """Записать домен один раз в пять минут.
+
+    Пишется только имя узла, без адреса, запроса и тела: подгружаемые
+    картинки и скрипты смысла в журнале не несут, а места занимают больше
+    всего. Строка выходит около сорока байт.
+    """
+    if not host or not login:
+        return
+
+    key = login + "|" + host
+    now = time.time()
+    with SEEN_LOCK:
+        last = SEEN.get(key, 0)
+        if now - last < SEEN_SECONDS:
+            return
+        SEEN[key] = now
+        if len(SEEN) > 20000:
+            for old in [name for name, stamp in SEEN.items() if now - stamp > SEEN_SECONDS]:
+                SEEN.pop(old, None)
+
+    record = {"kind": "site", "value": host, "at": int(now), "login": login}
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        client.sendto(json.dumps(record).encode(), TRAFFIC_SOCKET)
+        client.close()
+    except OSError:
+        pass
 
 
 def read_secret():
@@ -124,6 +212,17 @@ class Handler(socketserver.BaseRequestHandler):
 
         split = head.index(b"\r\n\r\n")
         rest = head[split + 4:]
+
+        login = read_login()
+        host = host_from_head(head[:split])
+        note_visit(host, login)
+
+        if POLICY is not None and host:
+            verdict = POLICY.decide(host, login, POLICY.read_policy(POLICY_FILE))
+            if verdict[0] == "block":
+                client.sendall(BLOCKED)
+                return
+
         new_head = rewrite_head(head[:split], token)
 
         try:

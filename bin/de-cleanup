@@ -65,6 +65,7 @@ remove_user() {
     mountpoint -q "$box/root" && umount "$box/root"
     rm -rf "$box"
     rm -f "/run/digital-examen/login-$name"
+    rm -f "/run/digital-examen/informatics-$name"
 
     if [ -n "$home" ]; then
         mountpoint -q "$home" && umount "$home"

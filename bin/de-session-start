@@ -10,4 +10,12 @@ if [ "`id -gn`" != "$GROUP" ]; then
     exec "$SESSION"
 fi
 
+MARK="/run/digital-examen/informatics-`id -un`"
+INFORMATICS=""
+[ -f "$MARK" ] && INFORMATICS=`cat "$MARK"`
+
+if [ "$INFORMATICS" = "admin" ]; then
+    exec "$SESSION"
+fi
+
 exec sudo -E -n /usr/local/sbin/de-enter-net

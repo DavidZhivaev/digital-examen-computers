@@ -33,6 +33,7 @@ def read_config():
 
 CONFIG = read_config()
 API = CONFIG.get("DE_API_URL", "")
+COMPUTER = CONFIG.get("DE_COMPUTER_ID", "")
 SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
 
 
@@ -68,11 +69,13 @@ def read_secret():
 
 
 def post(payload):
-    url = API.rstrip("/") + "/api/fleet/session"
-    request = urllib.request.Request(url, data=json.dumps(payload).encode())
-    request.add_header("Content-Type", "application/json")
-    request.add_header("X-De-Secret", read_secret())
-    OPENER.open(request, timeout=15).read()
+    for path in ("/api/computers/device/login", "/api/fleet/session"):
+        url = API.rstrip("/") + path
+        request = urllib.request.Request(url, data=json.dumps(payload).encode())
+        request.add_header("Content-Type", "application/json")
+        request.add_header("X-De-Computer", COMPUTER)
+        request.add_header("X-De-Secret", read_secret())
+        OPENER.open(request, timeout=15).read()
 
 
 def remember(payload):
@@ -112,6 +115,7 @@ def main():
     payload = {
         "event": sys.argv[1],
         "login": sys.argv[2],
+        "computer": COMPUTER,
         "hostname": socket.gethostname(),
         "time": int(time.time()),
     }

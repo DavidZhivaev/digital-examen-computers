@@ -2,20 +2,31 @@
 
 import json
 import os
+import shutil
+import subprocess
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-DATA_DIR = os.environ.get("DE_SCREEN_DATA", "/data/screens")
+DATA_DIR = os.environ.get("DE_SCREEN_DATA", "/data/digital-examen/screens")
+LIVE_DIR = os.environ.get("DE_SCREEN_LIVE", "/run/digital-examen/live")
+STATE_DIR = os.environ.get("DE_SCREEN_STATE", "/data/digital-examen/state")
+GLUE = os.environ.get("DE_SCREEN_GLUE", "/usr/local/bin/glue.py")
+PYTHON = os.environ.get("DE_SCREEN_PYTHON", "/usr/bin/python3")
+
 SECRET_FILE = os.environ.get("DE_SCREEN_SECRET", "/etc/digital-examen/proxy.secret")
 COMMAND_SECRET_FILE = os.environ.get("DE_COMMAND_SECRET", "")
-KEEP_DAYS = int(os.environ.get("DE_SCREEN_KEEP_DAYS", "10"))
 PORT = int(os.environ.get("DE_SCREEN_PORT", "9840"))
+CONSOLE_WAIT = int(os.environ.get("DE_CONSOLE_WAIT", "45"))
 
-MODES = {}
+WATCHED = {}
 QUEUES = {}
 RESULTS = {}
+STATS = {}
+POLICY = {}
 COUNTER = {"value": 0}
+LOCK = threading.Lock()
 
 
 def read_secret():
@@ -34,42 +45,62 @@ def same(first, second):
     if not first or not second or len(first) != len(second):
         return False
     bad = 0
-    for a, b in zip(first, second):
-        bad |= ord(a) ^ ord(b)
+    for one, two in zip(first, second):
+        bad |= ord(one) ^ ord(two)
     return bad == 0
 
 
-def safe_login(login):
+def safe_name(value):
     out = ""
-    for char in login.lower():
+    for char in str(value).lower():
         if char.isalnum() or char in "_-":
             out += char
     return out
 
 
-def frame_dir(login, stamp, frame_no):
+def login_dir(computer, login, stamp):
     day = time.strftime("%Y-%m-%d", time.localtime(stamp))
-    return os.path.join(DATA_DIR, day, login, "%010d" % frame_no)
+    return os.path.join(DATA_DIR, day, safe_name(computer), safe_name(login) or "unknown")
 
 
-def store(header, blobs):
-    login = safe_login(header["login"])
-    path = frame_dir(login, header["time"], header["frame"])
+def store_live(header, blob):
+    computer = safe_name(header.get("computer", ""))
+    if not computer or not blob:
+        return
+    os.makedirs(LIVE_DIR, exist_ok=True)
+    path = os.path.join(LIVE_DIR, computer + ".webp")
+    temporary = path + ".new"
+    out = open(temporary, "wb")
+    out.write(blob)
+    out.close()
+    os.replace(temporary, path)
+
+
+def store_frame(header, blobs):
+    computer = safe_name(header.get("computer", ""))
+    login = header.get("login", "")
+    if not computer:
+        return 0
+
+    folder = login_dir(computer, login, header["time"])
+    path = os.path.join(folder, "%010d" % header["frame"])
     os.makedirs(path, exist_ok=True)
 
+    written = 0
     names = []
     for position, piece in enumerate(header["pieces"]):
-        col = piece[0]
-        if col < 0:
+        if piece[0] < 0:
             name = "full.webp"
         else:
             name = "r%d_%d_%d.webp" % (piece[0], piece[1], piece[2])
         out = open(os.path.join(path, name), "wb")
         out.write(blobs[position])
         out.close()
+        written += len(blobs[position])
         names.append(name)
 
     meta = {
+        "computer": computer,
         "login": login,
         "frame": header["frame"],
         "time": header["time"],
@@ -84,17 +115,47 @@ def store(header, blobs):
     out.write(json.dumps(meta))
     out.close()
 
-    latest = open(os.path.join(DATA_DIR, "latest-" + login + ".json"), "w")
-    latest.write(json.dumps(meta))
-    latest.close()
+    note_record(folder, header, written)
+    return written
 
-    if header.get("thumb"):
-        thumb = open(os.path.join(DATA_DIR, "thumb-" + login + ".webp"), "wb")
-        thumb.write(blobs[-1])
-        thumb.close()
+
+def note_record(folder, header, written):
+    path = os.path.join(folder, "record.json")
+    record = {
+        "computer": safe_name(header.get("computer", "")),
+        "login": header.get("login", ""),
+        "started": header["time"],
+        "last": header["time"],
+        "frames": 0,
+        "bytes": 0,
+        "step": 2,
+        "width": header["size"][0],
+        "height": header["size"][1],
+    }
+    if os.path.exists(path):
+        try:
+            record.update(json.loads(open(path).read()))
+        except ValueError:
+            pass
+
+    record["last"] = header["time"]
+    record["frames"] = int(record.get("frames", 0)) + 1
+    record["bytes"] = int(record.get("bytes", 0)) + written
+    record["seconds"] = max(0, record["last"] - record["started"])
+
+    out = open(path, "w")
+    out.write(json.dumps(record))
+    out.close()
+
+
+def queue_command(computer, command):
+    with LOCK:
+        QUEUES.setdefault(safe_name(computer), []).append(command)
 
 
 class Handler(BaseHTTPRequestHandler):
+
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, *args):
         return
@@ -107,31 +168,91 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def send_blob(self, data, kind):
+        self.send_response(200)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def allowed(self, command_level):
+        sent = self.headers.get("X-De-Secret", "")
+        if command_level:
+            return same(sent, read_command_secret())
+        return same(sent, read_secret()) or same(sent, read_command_secret())
+
+    def body_json(self, limit=1024 * 1024):
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > limit:
+            return None
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except ValueError:
+            return None
+
     def do_POST(self):
-        route = self.path.rstrip("/")
+        route = urlparse(self.path).path.rstrip("/")
+        query = parse_qs(urlparse(self.path).query)
+
+        if route == "/frame":
+            self.take_frame()
+            return
 
         if route == "/result":
             if not self.allowed(False):
                 self.reply(403, {"error": "bad secret"})
                 return
-            length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0 or length > 1024 * 1024:
-                self.reply(400, {"error": "bad length"})
-                return
-            try:
-                payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            except ValueError:
+            payload = self.body_json()
+            if payload is None:
                 self.reply(400, {"error": "bad json"})
                 return
-            batch = str(payload.get("id", "")).split(":")[0]
-            RESULTS.setdefault(batch, []).append(payload)
+            with LOCK:
+                RESULTS[str(payload.get("id", ""))] = payload
             self.reply(200, {"ok": True})
             return
 
-        if route != "/frame":
-            self.reply(404, {"error": "unknown path"})
+        if route == "/stats":
+            if not self.allowed(False):
+                self.reply(403, {"error": "bad secret"})
+                return
+            payload = self.body_json()
+            if payload is None:
+                self.reply(400, {"error": "bad json"})
+                return
+            computer = safe_name(payload.get("computer", ""))
+            if computer:
+                payload["time"] = int(time.time())
+                with LOCK:
+                    STATS[computer] = payload
+            self.reply(200, {"ok": True})
             return
 
+        if route == "/console":
+            if not self.allowed(True):
+                self.reply(403, {"error": "bad secret"})
+                return
+            self.run_console(safe_name(query.get("computer", [""])[0]))
+            return
+
+        parts = route.strip("/").split("/")
+        if parts[0] == "policy" and len(parts) == 2:
+            if not self.allowed(True):
+                self.reply(403, {"error": "bad secret"})
+                return
+            payload = self.body_json(limit=4 * 1024 * 1024)
+            if payload is None:
+                self.reply(400, {"error": "bad json"})
+                return
+            computer = safe_name(parts[1])
+            with LOCK:
+                POLICY[computer] = payload
+            queue_command(computer, {"name": "policy"})
+            self.reply(200, {"ok": True})
+            return
+
+        self.reply(404, {"error": "unknown path"})
+
+    def take_frame(self):
         if not self.allowed(False):
             self.reply(403, {"error": "bad secret"})
             return
@@ -153,8 +274,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(400, {"error": "bad header"})
             return
 
-        if header.get("login", "") != self.headers.get("X-De-Login", ""):
-            self.reply(403, {"error": "login mismatch"})
+        if header.get("computer", "") != self.headers.get("X-De-Computer", ""):
+            self.reply(403, {"error": "computer mismatch"})
             return
 
         offset = split + 1
@@ -164,24 +285,46 @@ class Handler(BaseHTTPRequestHandler):
             blobs.append(body[offset:offset + size])
             offset += size
 
-        thumb_size = int(header.get("thumb", 0))
-        if thumb_size:
-            blobs.append(body[offset:offset + thumb_size])
-
         try:
-            store(header, blobs)
-        except OSError as error:
+            if header.get("kind") == "live":
+                store_live(header, blobs[0] if blobs else b"")
+            else:
+                store_frame(header, blobs)
+        except (OSError, IndexError, KeyError) as error:
             self.reply(500, {"error": str(error)})
             return
 
-        login = safe_login(header["login"])
-        self.reply(200, {"ok": True, "interval": MODES.get(login, 0)})
+        self.reply(200, {"ok": True, "interval": watched_interval(header.get("computer", ""))})
 
-    def allowed(self, command_level):
-        sent = self.headers.get("X-De-Secret", "")
-        if command_level:
-            return same(sent, read_command_secret())
-        return same(sent, read_secret()) or same(sent, read_command_secret())
+    def run_console(self, computer):
+        payload = self.body_json()
+        if payload is None or not computer:
+            self.reply(400, {"error": "bad request"})
+            return
+
+        with LOCK:
+            COUNTER["value"] += 1
+            identifier = "c%d-%d" % (int(time.time()), COUNTER["value"])
+
+        queue_command(computer, {
+            "id": identifier,
+            "name": "exec",
+            "text": str(payload.get("command", "")),
+        })
+
+        deadline = time.time() + CONSOLE_WAIT
+        while time.time() < deadline:
+            with LOCK:
+                answer = RESULTS.pop(identifier, None)
+            if answer is not None:
+                self.reply(200, {
+                    "code": int(answer.get("code", 1)),
+                    "output": str(answer.get("output", "")),
+                })
+                return
+            time.sleep(0.3)
+
+        self.reply(200, {"code": 124, "output": "компьютер не ответил за %d с" % CONSOLE_WAIT})
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -192,122 +335,136 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, {"ok": True})
             return
 
-        command_level = parts[0] in ("batch", "command", "live")
+        command_level = parts[0] in ("watch", "power", "record")
         if not self.allowed(command_level):
             self.reply(403, {"error": "bad secret"})
             return
 
         if parts[0] == "commands":
-            login = safe_login(query.get("login", [""])[0])
-            wait = min(60, max(1, int(query.get("wait", ["25"])[0])))
-            if not login:
-                self.reply(400, {"error": "no login"})
-                return
-            deadline = time.time() + wait
-            while time.time() < deadline:
-                queue = QUEUES.get(login)
-                if queue:
-                    QUEUES[login] = []
-                    self.reply(200, {"commands": queue})
-                    return
-                time.sleep(0.5)
-            self.reply(200, {"commands": []})
+            self.long_poll(query)
             return
 
-        if parts[0] == "results" and len(parts) == 2:
-            batch = parts[1]
-            self.reply(200, {"batch": batch, "results": RESULTS.get(batch, [])})
+        if parts[0] == "watch":
+            interval = max(1, int(query.get("interval", ["2"])[0]))
+            names = [safe_name(item) for item in query.get("computer", [])]
+            now = time.time()
+            with LOCK:
+                for name in names:
+                    if name:
+                        WATCHED[name] = (now, interval)
+            self.reply(200, {"ok": True, "watched": names, "interval": interval})
             return
 
-        if parts[0] == "batch":
+        if parts[0] == "power":
             name = query.get("name", [""])[0]
-            logins = [safe_login(item) for item in query.get("login", [])]
-            if not name or not logins:
-                self.reply(400, {"error": "need name and login"})
+            if name not in ("reboot", "shutdown"):
+                self.reply(400, {"error": "bad action"})
                 return
-            COUNTER["value"] += 1
-            batch = "b%d-%d" % (int(time.time()), COUNTER["value"])
-            RESULTS[batch] = []
             sent = []
-            for login in logins:
-                command = {"id": batch + ":" + login, "batch": batch, "name": name}
-                if "interval" in query:
-                    command["interval"] = int(query["interval"][0])
-                if "text" in query:
-                    command["text"] = query["text"][0]
-                if "delay" in query:
-                    command["delay"] = query["delay"][0]
-                QUEUES.setdefault(login, []).append(command)
-                sent.append(login)
-                if name == "live":
-                    MODES[login] = command.get("interval", 1)
-                if name == "archive":
-                    MODES.pop(login, None)
-            self.reply(200, {"ok": True, "batch": batch, "sent": sent})
+            for item in query.get("computer", []):
+                computer = safe_name(item)
+                if not computer:
+                    continue
+                queue_command(computer, {"name": name, "delay": "now"})
+                sent.append(computer)
+            self.reply(200, {"ok": True, "sent": sent})
             return
 
-        if parts[0] == "command" and len(parts) == 2:
-            login = safe_login(parts[1])
-            name = query.get("name", [""])[0]
-            if not name:
-                self.reply(400, {"error": "no name"})
-                return
-            command = {"name": name}
-            if "interval" in query:
-                command["interval"] = int(query["interval"][0])
-            if "text" in query:
-                command["text"] = query["text"][0]
-            QUEUES.setdefault(login, []).append(command)
-            if name == "live":
-                MODES[login] = command.get("interval", 1)
-            if name == "archive":
-                MODES.pop(login, None)
-            self.reply(200, {"ok": True, "queued": command})
-            return
-
-        if parts[0] == "thumb" and len(parts) == 2:
-            path = os.path.join(DATA_DIR, "thumb-" + safe_login(parts[1]) + ".webp")
+        if parts[0] == "shot" and len(parts) == 2:
+            path = os.path.join(LIVE_DIR, safe_name(parts[1]) + ".webp")
             if not os.path.exists(path):
-                self.reply(404, {"error": "no thumb"})
+                self.reply(404, {"error": "no shot"})
                 return
-            data = open(path, "rb").read()
-            self.send_response(200)
-            self.send_header("Content-Type", "image/webp")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            self.send_blob(open(path, "rb").read(), "image/webp")
             return
 
-        if parts[0] == "latest" and len(parts) == 2:
-            path = os.path.join(DATA_DIR, "latest-" + safe_login(parts[1]) + ".json")
-            if not os.path.exists(path):
-                self.reply(404, {"error": "no frames"})
-                return
-            self.reply(200, json.loads(open(path).read()))
+        if parts[0] == "stats" and len(parts) == 2:
+            with LOCK:
+                self.reply(200, STATS.get(safe_name(parts[1]), {}))
             return
 
-        if parts[0] == "live" and len(parts) == 3:
-            login = safe_login(parts[1])
-            MODES[login] = max(1, int(parts[2]))
-            self.reply(200, {"ok": True, "login": login, "interval": MODES[login]})
-            return
-
-        if parts[0] == "piece" and len(parts) == 5:
-            login = safe_login(parts[1])
-            path = os.path.join(DATA_DIR, parts[2], login, parts[3], os.path.basename(parts[4]))
-            if not os.path.exists(path) or not path.endswith(".webp"):
-                self.reply(404, {"error": "no piece"})
-                return
-            data = open(path, "rb").read()
-            self.send_response(200)
-            self.send_header("Content-Type", "image/webp")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+        if parts[0] == "record" and len(parts) == 3:
+            self.send_record(safe_name(parts[1]), parts[2])
             return
 
         self.reply(404, {"error": "unknown path"})
 
+    def long_poll(self, query):
+        computer = safe_name(query.get("computer", [""])[0])
+        wait = min(60, max(1, int(query.get("wait", ["25"])[0])))
+        if not computer:
+            self.reply(400, {"error": "no computer"})
+            return
+
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            with LOCK:
+                queue = QUEUES.get(computer)
+                if queue:
+                    QUEUES[computer] = []
+                    for command in queue:
+                        if command.get("name") == "policy":
+                            command["policy"] = POLICY.get(computer, {})
+                    self.reply(200, {"commands": queue})
+                    return
+            time.sleep(0.5)
+
+        self.reply(200, {"commands": [], "interval": watched_interval(computer)})
+
+    def send_record(self, computer, record_id):
+        folder = find_record(computer, record_id)
+        if folder is None:
+            self.reply(404, {"error": "no record"})
+            return
+
+        target = os.path.join("/tmp", "de-record-%s-%s.webm" % (computer, safe_name(record_id)))
+        if not os.path.exists(target):
+            code = subprocess.call(
+                ["nice", "-n", "19", PYTHON, GLUE, folder, target],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            if code != 0 or not os.path.exists(target):
+                self.reply(500, {"error": "не удалось склеить запись"})
+                return
+
+        self.send_blob(open(target, "rb").read(), "video/webm")
+
+
+def find_record(computer, record_id):
+    if not os.path.isdir(DATA_DIR):
+        return None
+    for day in sorted(os.listdir(DATA_DIR), reverse=True):
+        base = os.path.join(DATA_DIR, day, computer)
+        if not os.path.isdir(base):
+            continue
+        for login in sorted(os.listdir(base)):
+            folder = os.path.join(base, login)
+            path = os.path.join(folder, "record.json")
+            if not os.path.exists(path):
+                continue
+            try:
+                record = json.loads(open(path).read())
+            except ValueError:
+                continue
+            if str(record.get("id", "")) == str(record_id):
+                return folder
+    return None
+
+
+def watched_interval(computer):
+    name = safe_name(computer)
+    with LOCK:
+        seen = WATCHED.get(name)
+        if not seen:
+            return 0
+        stamp, interval = seen
+        if time.time() - stamp > 6:
+            WATCHED.pop(name, None)
+            return 0
+        return interval
+
 
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(LIVE_DIR, exist_ok=True)
+os.makedirs(STATE_DIR, exist_ok=True)
 ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

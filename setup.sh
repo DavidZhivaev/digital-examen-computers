@@ -38,10 +38,15 @@ chmod 0755 "$CONFIG_DIR"
 chmod 0700 "$STATE_DIR"
 
 say "ставлю скрипты в $BIN_DIR"
-for script in de-login-auth de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen de-agent de-palette de-report; do
+for script in de-login-auth de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen de-agent de-palette de-report de-policy de-keywatch de-traffic de-init; do
     install -m 0750 -o root -g root "$HERE/bin/$script" "$BIN_DIR/$script"
 done
 install -m 0755 -o root -g root "$HERE/bin/de-session-start" /usr/local/bin/de-session-start
+install -m 0755 -o root -g root "$HERE/bin/de-note-command" /usr/local/bin/de-note-command
+
+say "ставлю запись команд консоли"
+mkdir -p /etc/profile.d
+install -m 0644 -o root -g root "$HERE/config/de-history.sh" /etc/profile.d/de-history.sh
 
 if [ ! -f "$CONFIG_FILE" ]; then
     say "создаю $CONFIG_FILE"
@@ -68,6 +73,10 @@ mkdir -p "${DE_BOX_BASE:-/var/lib/digital-examen/box-base}"
 
 say "создаю группу $GROUP"
 getent group "$GROUP" >/dev/null 2>&1 || /usr/sbin/groupadd --system "$GROUP"
+
+KEY_GROUP="${DE_KEY_SUDO_GROUP:-de-keyholders}"
+say "создаю группу $KEY_GROUP для владельцев ключа"
+getent group "$KEY_GROUP" >/dev/null 2>&1 || /usr/sbin/groupadd --system "$KEY_GROUP"
 
 say "запрещаю ssh и cron для $GROUP"
 mkdir -p /etc/ssh/sshd_config.d
@@ -123,17 +132,19 @@ say "ставлю сеанс со школьным прокси"
 mkdir -p /usr/share/xsessions
 install -m 0644 -o root -g root "$HERE/xsessions/00-de-student.desktop" /usr/share/xsessions/00-de-student.desktop
 
-say "проверяю и ставлю правило sudo"
-TMP_SUDO=`mktemp`
-cat "$HERE/config/sudoers.de-students" > "$TMP_SUDO"
-chmod 0440 "$TMP_SUDO"
-if /usr/sbin/visudo -cqf "$TMP_SUDO"; then
-    install -m 0440 -o root -g root "$TMP_SUDO" /etc/sudoers.d/de-students
-    rm -f "$TMP_SUDO"
-else
-    rm -f "$TMP_SUDO"
-    fail "правило sudo не прошло проверку, ничего не менял"
-fi
+say "проверяю и ставлю правила sudo"
+for rule in de-students de-keyholders; do
+    TMP_SUDO=`mktemp`
+    cat "$HERE/config/sudoers.$rule" > "$TMP_SUDO"
+    chmod 0440 "$TMP_SUDO"
+    if /usr/sbin/visudo -cqf "$TMP_SUDO"; then
+        install -m 0440 -o root -g root "$TMP_SUDO" "/etc/sudoers.d/$rule"
+        rm -f "$TMP_SUDO"
+    else
+        rm -f "$TMP_SUDO"
+        fail "правило sudo $rule не прошло проверку, ничего не менял"
+    fi
+done
 
 say "запрещаю вход в текстовую консоль для $GROUP"
 if ! grep -q "notingroup $GROUP" /etc/pam.d/login; then
@@ -151,13 +162,15 @@ if ! grep -q "notingroup $GROUP" /etc/pam.d/login; then
 fi
 
 say "ставлю службы"
-for unit in de-cleanup.service de-screen.service de-agent.service; do
+for unit in de-cleanup.service de-screen.service de-agent.service de-keywatch.service de-traffic.service; do
     install -m 0644 -o root -g root "$HERE/systemd/$unit" "/etc/systemd/system/$unit"
 done
 systemctl daemon-reload
 systemctl enable de-cleanup.service
 systemctl enable de-screen.service
 systemctl enable de-agent.service
+systemctl enable de-keywatch.service
+systemctl enable de-traffic.service
 
 say "проверяю, что есть всё для сетевого замка и песочницы"
 [ -x /usr/bin/ip ] || fail "не найден ip"
@@ -173,7 +186,14 @@ say "проверяю конфиг sshd"
 /usr/sbin/sshd -t || fail "sshd не принял конфиг"
 systemctl reload sshd >/dev/null 2>&1 || true
 
+say "называю компьютер"
+if [ -n "$DE_API_URL" ] && [ -s "$SECRET_FILE" ]; then
+    /usr/bin/python3 "$BIN_DIR/de-init" || say "инициализация не завершена, запустите de-init позже"
+else
+    say "сначала впишите DE_API_URL и общий секрет прокси, затем запустите de-init"
+fi
+
 say "готово"
 say "защищённые пользователи: $PROTECTED"
-say "впишите DE_API_URL и общий секрет прокси, затем перезагрузите компьютер"
 say "секрет прокси: $SECRET_FILE (должен совпадать с ШС)"
+say "перезагрузите компьютер"
