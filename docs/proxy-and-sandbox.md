@@ -118,8 +118,8 @@ HTTPS фильтруется **без подмены сертификатов**:
 В конфигурации компьютера нет и не должно быть адреса VPS:
 
 ```
-DE_SCHOOL_PROXY_HOST="sch-1580-2-1580.obr.mos.ru"
-DE_SCHOOL_PROXY_FALLBACK="10.171.219.221"
+DE_SCHOOL_PROXY_HOST="as.1580.ru"
+DE_SCHOOL_PROXY_FALLBACK="sch-1580-2-1580.obr.mos.ru"
 ```
 
 Корпуса школы достают ШС напрямую, VPS в этом пути не участвует вообще. Смена VPS

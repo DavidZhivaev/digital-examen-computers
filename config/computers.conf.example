@@ -1,4 +1,4 @@
-DE_API_URL="https://examen.1580.ru"
+DE_API_URL="https://as.1580.ru"
 DE_API_TIMEOUT="10"
 DE_DEVICE_NAME=""
 
@@ -20,8 +20,8 @@ DE_PROTECTED_USERS="root"
 
 DE_LOG_FILE="/var/log/digital-examen-computers.log"
 
-DE_SCHOOL_PROXY_HOST="sch-1580-2-1580.obr.mos.ru"
-DE_SCHOOL_PROXY_FALLBACK="10.171.219.221"
+DE_SCHOOL_PROXY_HOST="as.1580.ru"
+DE_SCHOOL_PROXY_FALLBACK="sch-1580-2-1580.obr.mos.ru"
 DE_SCHOOL_PROXY_PORT="3128"
 DE_PROXY_SECRET_FILE="/etc/digital-examen/proxy.secret"
 
@@ -33,7 +33,7 @@ DE_NETNS_HOST_IF="de-host"
 DE_NETNS_GUEST_IF="de-net"
 DE_RELAY_PORT="3128"
 
-DE_SCREEN_URL="https://sch-1580-2-1580.obr.mos.ru/screens"
+DE_SCREEN_URL="https://as.1580.ru/screens"
 DE_SCREEN_WIDTH="1280"
 DE_SCREEN_HEIGHT="720"
 DE_SCREEN_STORE_WIDTH="1024"

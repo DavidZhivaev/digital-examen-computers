@@ -30,7 +30,7 @@ services:
       - ./proxy.secret:/run/secrets/proxy.secret:ro
       - ./notify.secret:/run/secrets/notify.secret:ro
     environment:
-      DE_API_URL: "${DE_API_URL:-https://examen.1580.ru}"
+      DE_API_URL: "${DE_API_URL:-https://as.1580.ru}"
       DE_NOTIFY_URL: "http://de-alerts:8099/notify"
       DE_SCREEN_LIMIT_GB: "900"
     networks:
@@ -49,7 +49,7 @@ services:
       - /run/digital-examen/live:/run/digital-examen/live:ro
       - ./proxy.secret:/run/secrets/proxy.secret:ro
     environment:
-      DE_API_URL: "${DE_API_URL:-https://examen.1580.ru}"
+      DE_API_URL: "${DE_API_URL:-https://as.1580.ru}"
     networks:
       - de-edge
 
