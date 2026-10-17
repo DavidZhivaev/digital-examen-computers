@@ -88,10 +88,12 @@ def check_key(values):
     body = json.dumps({
         "fingerprint": values.get("fingerprint", ""),
         "secret": values.get("secret", ""),
+        "computer": CONFIG.get("DE_COMPUTER_ID", ""),
     }).encode()
     request = urllib.request.Request(
         API.rstrip("/") + "/api/computers/device/key-check", data=body)
     request.add_header("Content-Type", "application/json")
+    request.add_header("X-De-Computer", CONFIG.get("DE_COMPUTER_ID", ""))
     request.add_header("X-De-Secret", read_file(SECRET_FILE))
     try:
         answer = OPENER.open(request, timeout=20)
