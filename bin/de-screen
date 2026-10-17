@@ -2,6 +2,7 @@
 
 import json
 import os
+import ssl
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,19 @@ KEY_EVERY = int(CONFIG.get("DE_SCREEN_KEYFRAME_EVERY", "40"))
 KEY_SHARE = int(CONFIG.get("DE_SCREEN_KEYFRAME_SHARE", "30"))
 WORK_DIR = CONFIG.get("DE_SCREEN_WORK_DIR", "/run/digital-examen/screen")
 SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
+
+
+def build_opener():
+    ca = CONFIG.get("DE_SCREEN_CA", "")
+    if not ca or not os.path.exists(ca):
+        return urllib.request.build_opener()
+    context = ssl.create_default_context(cafile=ca)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+
+
+OPENER = build_opener()
 
 INTERVAL_MIN = int(CONFIG.get("DE_SCREEN_INTERVAL_MIN", "1"))
 INTERVAL_MAX = int(CONFIG.get("DE_SCREEN_INTERVAL_MAX", "20"))
@@ -136,13 +150,28 @@ def make_palette():
     subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def encode_tile(index):
-    col = index % COLS
-    row = index // COLS
-    path = os.path.join(WORK_DIR, "t%d.webp" % index)
+def find_runs(changed):
+    marks = set(changed)
+    out = []
+    for row in range(ROWS):
+        col = 0
+        while col < COLS:
+            if row * COLS + col in marks:
+                start = col
+                while col < COLS and row * COLS + col in marks:
+                    col += 1
+                out.append((start, row, col - start))
+            else:
+                col += 1
+    return out
+
+
+def encode_run(run):
+    col, row, width = run
+    path = os.path.join(WORK_DIR, "r%d_%d.webp" % (col, row))
     command = [
         "magick", "-size", "%dx%d" % (WIDTH, HEIGHT), "-depth", "8", "rgb:" + RAW,
-        "-crop", "%dx%d+%d+%d" % (TILE, TILE, col * TILE, row * TILE), "+repage",
+        "-crop", "%dx%d+%d+%d" % (width * TILE, TILE, col * TILE, row * TILE), "+repage",
     ] + palette_args() + [
         "-quality", QUALITY, "webp:" + path,
     ]
@@ -181,7 +210,7 @@ def encode_thumb():
 
 def send(login, frame_no, keyframe, pieces, thumb):
     header = {
-        "version": 2,
+        "version": 3,
         "login": login,
         "frame": frame_no,
         "time": int(time.time()),
@@ -190,10 +219,10 @@ def send(login, frame_no, keyframe, pieces, thumb):
         "tile": TILE,
         "keyframe": keyframe,
         "thumb": len(thumb),
-        "pieces": [[index, len(blob)] for index, blob in pieces],
+        "pieces": [[run[0], run[1], run[2], len(blob)] for run, blob in pieces],
     }
     body = json.dumps(header).encode() + b"\n"
-    for index, blob in pieces:
+    for run, blob in pieces:
         body += blob
     body += thumb
 
@@ -201,7 +230,7 @@ def send(login, frame_no, keyframe, pieces, thumb):
     request.add_header("Content-Type", "application/octet-stream")
     request.add_header("X-De-Login", login)
     request.add_header("X-De-Secret", read_secret())
-    answer = urllib.request.urlopen(request, timeout=20)
+    answer = OPENER.open(request, timeout=20)
     return json.loads(answer.read().decode("utf-8")), len(body)
 
 
@@ -254,10 +283,10 @@ def main():
         try:
             if keyframe:
                 make_palette()
-                pieces = [[-1, encode_full()]]
+                pieces = [[(-1, 0, 0), encode_full()]]
             else:
-                for index in changed:
-                    pieces.append([index, encode_tile(index)])
+                for run in find_runs(changed):
+                    pieces.append([run, encode_run(run)])
             if since_thumb >= THUMB_EVERY:
                 thumb = encode_thumb()
         except (subprocess.CalledProcessError, OSError):

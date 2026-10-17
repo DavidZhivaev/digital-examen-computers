@@ -3,6 +3,7 @@
 import json
 import os
 import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -35,6 +36,19 @@ def read_config():
 CONFIG = read_config()
 URL = CONFIG.get("DE_SCREEN_URL", "")
 SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
+
+
+def build_opener():
+    ca = CONFIG.get("DE_SCREEN_CA", "")
+    if not ca or not os.path.exists(ca):
+        return urllib.request.build_opener()
+    context = ssl.create_default_context(cafile=ca)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+
+
+OPENER = build_opener()
 MODE_FILE = CONFIG.get("DE_SCREEN_MODE_FILE", "/run/digital-examen/screen-mode")
 WAIT = int(CONFIG.get("DE_AGENT_WAIT", "25"))
 ALLOW_EXEC = CONFIG.get("DE_AGENT_ALLOW_EXEC", "1") == "1"
@@ -78,7 +92,7 @@ def ask(login):
     request = urllib.request.Request(url)
     request.add_header("X-De-Login", login)
     request.add_header("X-De-Secret", read_secret())
-    answer = urllib.request.urlopen(request, timeout=WAIT + 15)
+    answer = OPENER.open(request, timeout=WAIT + 15)
     return json.loads(answer.read().decode("utf-8"))
 
 
@@ -104,7 +118,7 @@ def send_result(command, code, output):
     request.add_header("Content-Type", "application/json")
     request.add_header("X-De-Secret", read_secret())
     try:
-        urllib.request.urlopen(request, timeout=20)
+        OPENER.open(request, timeout=20)
     except (urllib.error.URLError, urllib.error.HTTPError, OSError):
         log("result not delivered for " + str(command.get("id")))
 

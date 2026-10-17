@@ -18,6 +18,11 @@ def read_frames(folder):
     return frames
 
 
+def covered(piece):
+    col, row, width = piece[0], piece[1], piece[2]
+    return set((col + step, row) for step in range(width))
+
+
 def merge(group):
     start = 0
     for position in range(len(group) - 1, -1, -1):
@@ -25,24 +30,32 @@ def merge(group):
             start = position
             break
 
-    tiles = {}
+    kept = []
     keyframe = False
     full = None
 
-    for path, meta in group[start:]:
+    for path, meta in reversed(group[start:]):
         if meta["keyframe"]:
             keyframe = True
-            tiles = {}
             full = (path, meta["files"][0])
+            kept = []
             continue
-        for position, index in enumerate(meta["pieces"]):
-            tiles[index] = (path, meta["files"][position])
+        for position in range(len(meta["pieces"]) - 1, -1, -1):
+            piece = meta["pieces"][position]
+            area = covered(piece)
+            taken = set()
+            for other, _ in kept:
+                taken |= covered(other)
+            if area - taken:
+                kept.append((piece, (path, meta["files"][position])))
+
+    kept.reverse()
 
     last = group[-1][1]
     return {
         "keyframe": keyframe,
         "full": full,
-        "tiles": tiles,
+        "pieces": kept,
         "time": last["time"],
         "login": last["login"],
         "size": last["size"],
@@ -62,14 +75,13 @@ def write_frame(target_dir, number, merged):
     if merged["keyframe"] and merged["full"]:
         source, name = merged["full"]
         shutil.copyfile(os.path.join(source, name), os.path.join(path, "full.webp"))
-        pieces.append(-1)
+        pieces.append([-1, 0, 0])
         files.append("full.webp")
 
-    for index in sorted(merged["tiles"]):
-        source, name = merged["tiles"][index]
-        out_name = "t%d.webp" % index
+    for piece, (source, name) in merged["pieces"]:
+        out_name = "r%d_%d_%d.webp" % (piece[0], piece[1], piece[2])
         shutil.copyfile(os.path.join(source, name), os.path.join(path, out_name))
-        pieces.append(index)
+        pieces.append([piece[0], piece[1], piece[2]])
         files.append(out_name)
 
     meta = {

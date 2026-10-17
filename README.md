@@ -165,6 +165,9 @@ cp /etc/pam.d/sddm.before-digital-examen /etc/pam.d/sddm
 - [docs/filter-instead-of-squid.md](docs/filter-instead-of-squid.md) — чем
   заменить squid, свой сертификат на каждом компьютере, чёрные списки, стоимость
   журнала и сроки хранения.
+- [docs/screen-capacity.md](docs/screen-capacity.md) — экраны после
+  оптимизации: тайл 16×16, склейка в полосы, 2% канала корпуса и 30 дней в
+  900 ГБ.
 - [docs/capacity-and-ai.md](docs/capacity-and-ai.md) — сколько съест канал и
   диск по замерам, учёт сеансов, проверенные приёмы против ИИ в поиске Google и
   выбор модели для ШС.

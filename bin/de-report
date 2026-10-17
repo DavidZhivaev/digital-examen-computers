@@ -3,6 +3,7 @@
 import json
 import os
 import socket
+import ssl
 import sys
 import time
 import urllib.error
@@ -33,6 +34,19 @@ def read_config():
 CONFIG = read_config()
 API = CONFIG.get("DE_API_URL", "")
 SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
+
+
+def build_opener():
+    ca = CONFIG.get("DE_SCREEN_CA", "")
+    if not ca or not os.path.exists(ca):
+        return urllib.request.build_opener()
+    context = ssl.create_default_context(cafile=ca)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+
+
+OPENER = build_opener()
 LOG = CONFIG.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
 QUEUE = os.path.join(STATE_DIR, "report-queue.jsonl")
 
@@ -58,7 +72,7 @@ def post(payload):
     request = urllib.request.Request(url, data=json.dumps(payload).encode())
     request.add_header("Content-Type", "application/json")
     request.add_header("X-De-Secret", read_secret())
-    urllib.request.urlopen(request, timeout=15).read()
+    OPENER.open(request, timeout=15).read()
 
 
 def remember(payload):

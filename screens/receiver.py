@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 DATA_DIR = os.environ.get("DE_SCREEN_DATA", "/data/screens")
 SECRET_FILE = os.environ.get("DE_SCREEN_SECRET", "/etc/digital-examen/proxy.secret")
+COMMAND_SECRET_FILE = os.environ.get("DE_COMMAND_SECRET", "")
 KEEP_DAYS = int(os.environ.get("DE_SCREEN_KEEP_DAYS", "10"))
 PORT = int(os.environ.get("DE_SCREEN_PORT", "9840"))
 
@@ -21,6 +22,21 @@ def read_secret():
     if not os.path.exists(SECRET_FILE):
         return ""
     return open(SECRET_FILE).read().strip()
+
+
+def read_command_secret():
+    if COMMAND_SECRET_FILE and os.path.exists(COMMAND_SECRET_FILE):
+        return open(COMMAND_SECRET_FILE).read().strip()
+    return read_secret()
+
+
+def same(first, second):
+    if not first or not second or len(first) != len(second):
+        return False
+    bad = 0
+    for a, b in zip(first, second):
+        bad |= ord(a) ^ ord(b)
+    return bad == 0
 
 
 def safe_login(login):
@@ -43,8 +59,11 @@ def store(header, blobs):
 
     names = []
     for position, piece in enumerate(header["pieces"]):
-        index = piece[0]
-        name = "full.webp" if index < 0 else "t%d.webp" % index
+        col = piece[0]
+        if col < 0:
+            name = "full.webp"
+        else:
+            name = "r%d_%d_%d.webp" % (piece[0], piece[1], piece[2])
         out = open(os.path.join(path, name), "wb")
         out.write(blobs[position])
         out.close()
@@ -58,7 +77,7 @@ def store(header, blobs):
         "grid": header["grid"],
         "tile": header["tile"],
         "keyframe": header["keyframe"],
-        "pieces": [piece[0] for piece in header["pieces"]],
+        "pieces": [piece[:3] for piece in header["pieces"]],
         "files": names,
     }
     out = open(os.path.join(path, "meta.json"), "w")
@@ -92,8 +111,7 @@ class Handler(BaseHTTPRequestHandler):
         route = self.path.rstrip("/")
 
         if route == "/result":
-            secret = read_secret()
-            if not secret or self.headers.get("X-De-Secret") != secret:
+            if not self.allowed(False):
                 self.reply(403, {"error": "bad secret"})
                 return
             length = int(self.headers.get("Content-Length", "0"))
@@ -114,8 +132,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404, {"error": "unknown path"})
             return
 
-        secret = read_secret()
-        if not secret or self.headers.get("X-De-Secret") != secret:
+        if not self.allowed(False):
             self.reply(403, {"error": "bad secret"})
             return
 
@@ -143,7 +160,7 @@ class Handler(BaseHTTPRequestHandler):
         offset = split + 1
         blobs = []
         for piece in header.get("pieces", []):
-            size = int(piece[1])
+            size = int(piece[-1])
             blobs.append(body[offset:offset + size])
             offset += size
 
@@ -160,16 +177,27 @@ class Handler(BaseHTTPRequestHandler):
         login = safe_login(header["login"])
         self.reply(200, {"ok": True, "interval": MODES.get(login, 0)})
 
+    def allowed(self, command_level):
+        sent = self.headers.get("X-De-Secret", "")
+        if command_level:
+            return same(sent, read_command_secret())
+        return same(sent, read_secret()) or same(sent, read_command_secret())
+
     def do_GET(self):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         parts = parsed.path.strip("/").split("/")
 
+        if parts[0] == "health":
+            self.reply(200, {"ok": True})
+            return
+
+        command_level = parts[0] in ("batch", "command", "live")
+        if not self.allowed(command_level):
+            self.reply(403, {"error": "bad secret"})
+            return
+
         if parts[0] == "commands":
-            secret = read_secret()
-            if not secret or self.headers.get("X-De-Secret") != secret:
-                self.reply(403, {"error": "bad secret"})
-                return
             login = safe_login(query.get("login", [""])[0])
             wait = min(60, max(1, int(query.get("wait", ["25"])[0])))
             if not login:
@@ -192,10 +220,6 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parts[0] == "batch":
-            secret = read_secret()
-            if not secret or self.headers.get("X-De-Secret") != secret:
-                self.reply(403, {"error": "bad secret"})
-                return
             name = query.get("name", [""])[0]
             logins = [safe_login(item) for item in query.get("login", [])]
             if not name or not logins:
