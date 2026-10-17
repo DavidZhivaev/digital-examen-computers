@@ -8,6 +8,7 @@ services:
       - "10.171.219.221:9840:9840"
     volumes:
       - /data/digital-examen/screens:/data/screens
+      - /run/digital-examen/live:/run/digital-examen/live
       - ./proxy.secret:/etc/digital-examen/proxy.secret:ro
       - ./command.secret:/etc/digital-examen/command.secret:ro
     environment:
@@ -45,6 +46,7 @@ services:
     command: ["/bin/sh", "/usr/local/bin/report-loop.sh"]
     volumes:
       - /data/digital-examen/screens:/data/screens:ro
+      - /run/digital-examen/live:/run/digital-examen/live:ro
       - ./proxy.secret:/run/secrets/proxy.secret:ro
     environment:
       DE_API_URL: "${DE_API_URL:-https://examen.1580.ru}"

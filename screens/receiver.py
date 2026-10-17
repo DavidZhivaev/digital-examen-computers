@@ -62,6 +62,24 @@ def login_dir(computer, login, stamp):
     return os.path.join(DATA_DIR, day, safe_name(computer), safe_name(login) or "unknown")
 
 
+def note_seen(computer):
+    """Отметка «кадры идут».
+
+    Включён компьютер или нет, решается именно по этому: пока он шлёт кадры,
+    он жив. Отдельному сердцебиению верить нельзя — оно может доходить и
+    тогда, когда экран давно не снимается.
+    """
+    name = safe_name(computer)
+    if not name:
+        return
+    try:
+        os.makedirs(LIVE_DIR, exist_ok=True)
+        path = os.path.join(LIVE_DIR, name + ".seen")
+        open(path, "w").close()
+    except OSError:
+        pass
+
+
 def store_live(header, blob):
     computer = safe_name(header.get("computer", ""))
     if not computer or not blob:
@@ -283,6 +301,8 @@ class Handler(BaseHTTPRequestHandler):
             size = int(piece[-1])
             blobs.append(body[offset:offset + size])
             offset += size
+
+        note_seen(header.get("computer", ""))
 
         try:
             if header.get("kind") == "live":

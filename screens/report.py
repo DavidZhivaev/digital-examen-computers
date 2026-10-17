@@ -3,10 +3,13 @@
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
 DATA_DIR = os.environ.get("DE_SCREEN_DATA", "/data/digital-examen/screens")
+LIVE_DIR = os.environ.get("DE_SCREEN_LIVE", "/run/digital-examen/live")
+SEEN_SECONDS = int(os.environ.get("DE_SEEN_SECONDS", "90"))
 API_URL = os.environ.get("DE_API_URL", "")
 SECRET_FILE = os.environ.get("DE_SCREENS_SECRET_FILE", "/run/secrets/proxy.secret")
 
@@ -104,9 +107,34 @@ def send_record(computer, folder):
     out.close()
 
 
+def send_seen():
+    """Кто сейчас шлёт кадры — тот и включён."""
+    if not os.path.isdir(LIVE_DIR):
+        return
+
+    alive = []
+    now = time.time()
+    for name in sorted(os.listdir(LIVE_DIR)):
+        if not name.endswith(".seen"):
+            continue
+        path = os.path.join(LIVE_DIR, name)
+        try:
+            if now - os.path.getmtime(path) <= SEEN_SECONDS:
+                alive.append(name[:-5])
+        except OSError:
+            continue
+
+    try:
+        post("/api/computers/device/seen", {"computers": alive})
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+        pass
+
+
 def main():
     if not API_URL:
         return 0
+
+    send_seen()
     for computer, folder in walk_records():
         send_record(computer, folder)
     return 0

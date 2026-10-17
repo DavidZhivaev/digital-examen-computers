@@ -3,10 +3,12 @@
 import sys
 
 COMPUTERS = 1440
-PER_CORPUS = 360
+CORPUSES = 4
+PER_CORPUS = COMPUTERS // CORPUSES
 LINK_MBITS = 100
 LINK_SHARE = 50
 DISK_BUDGET_GB = 900
+TRAFFIC_BUDGET_GB = 100
 
 DAY_START = 9
 DAY_END = 18
@@ -14,7 +16,8 @@ LESSON_MIN = 40
 BREAK_MIN = 15
 BREAK_STATIC_SHARE = 20
 
-SEND_STEP = 2
+STORE_STEP = 2
+WATCH_STEP = 2
 LIVE_STEP = 1
 
 MEASURE_SECONDS = 44.0
@@ -22,20 +25,23 @@ MEASURE_SECONDS = 44.0
 CALM_BYTES = {2: 26076, 4: 17796, 6: 11358, 8: 9968, 10: 8556}
 BUSY_BYTES = {2: 59922, 4: 53384, 6: 47750, 8: 47516, 10: 45884}
 
-LIVE_FRAME_CALM = 1078
-LIVE_FRAME_BUSY = 2329
-
 KEYFRAME_BYTES = 30000
 KEYFRAME_EVERY_SECONDS = 240
 
+HD_PIXEL_RATIO = (1280 * 720) / float(1024 * 576)
+HD_FULL_FRAME = 47000
+
+WATCH_SHARE = 0.25
+
+VISITS_PER_LESSON = 12
+VISIT_BYTES = 60
 SCHOOL_DAYS_PER_WEEK = 5
 
 LIFECYCLE = [
-    (1, 2, "в день записи"),
-    (9, 4, "до 2 недель"),
-    (5, 6, "3-я неделя"),
-    (5, 8, "4-я неделя"),
-    (10, 10, "5-я и 6-я недели"),
+    (1, 2, "день записи"),
+    (13, 4, "до 2 недель"),
+    (7, 6, "3-я неделя"),
+    (7, 8, "4-я неделя"),
 ]
 
 SCENARIOS = {
@@ -52,11 +58,12 @@ def delta_rate(step, busy_share):
     return busy_share * busy + (1.0 - busy_share) * calm
 
 
-def stored_rate(step, busy_share):
+def stored_rate(step, busy_share, hd):
     share = BREAK_STATIC_SHARE / 100.0
     keys = KEYFRAME_BYTES / float(KEYFRAME_EVERY_SECONDS)
-    lesson = delta_rate(step, busy_share) + keys
-    quiet = delta_rate(step, 0.0) + keys
+    scale = HD_PIXEL_RATIO if hd else 1.0
+    lesson = (delta_rate(step, busy_share) + keys) * scale
+    quiet = (delta_rate(step, 0.0) + keys) * scale
     return lesson, share * quiet + (1.0 - share) * lesson
 
 
@@ -68,16 +75,24 @@ def day_parts():
     return lessons * LESSON_MIN * 60, cycles * BREAK_MIN * 60
 
 
-def day_bytes(step, busy_share):
+def archive_day_bytes(step, busy_share, watch_share):
+    """Байт архива за день. Пока на кабинет смотрят, архив пишется в 720p."""
     lesson_s, break_s = day_parts()
-    lesson, during_break = stored_rate(step, busy_share)
-    return lesson_s * lesson + break_s * during_break
+    plain_lesson, plain_break = stored_rate(step, busy_share, False)
+    hd_lesson, _ = stored_rate(step, busy_share, True)
+
+    watched_s = lesson_s * watch_share
+    normal_s = lesson_s - watched_s
+    return watched_s * hd_lesson + normal_s * plain_lesson + break_s * plain_break
 
 
-def live_rate(busy_share):
-    calm = LIVE_FRAME_CALM / float(LIVE_STEP)
-    busy = LIVE_FRAME_BUSY / float(LIVE_STEP)
-    return busy_share * busy + (1.0 - busy_share) * calm
+def live_rate():
+    """Целый кадр 720p для сайта. Уходит только пока смотрят."""
+    return HD_FULL_FRAME * HD_PIXEL_RATIO / HD_PIXEL_RATIO
+
+
+def say(line=""):
+    sys.stdout.write(line + "\n")
 
 
 def main():
@@ -85,55 +100,83 @@ def main():
     seconds = lesson_s + break_s
     allowed = LINK_MBITS * LINK_SHARE / 100.0
 
-    print("1024x576, тайл 16x16, изменения склеиваются в полосы")
-    print("По сети: раз в %d с, у кого открыт экран учителя: раз в %d с" % (SEND_STEP, LIVE_STEP))
-    print("На диск: раз в %d с, ночью урезается до 4 с, дальше 6, 8, 10 с, через 6 недель удаляется" % SEND_STEP)
-    print("День: уроки %d мин, перемены %d мин, статичных на перемене %d%%" % (
+    say("СХЕМА")
+    say("  съёмка всегда 1280x720, тайл 16x16, изменения склеиваются в полосы")
+    say("  никто не смотрит  — архив 1024x576 раз в %d с" % STORE_STEP)
+    say("  открыт кабинет    — архив 1280x720 раз в %d с + целый кадр 720p" % WATCH_STEP)
+    say("  открыт компьютер  — то же, целый кадр раз в %d с" % LIVE_STEP)
+    say("  ночью 720p ужимается до 1024x576, дальше 4, 6, 8 с, через 4 недели удаление")
+    say()
+    say("ДЕНЬ: уроки %d мин, перемены %d мин, статичных на перемене %d%%" % (
         lesson_s // 60, break_s // 60, BREAK_STATIC_SHARE))
-    print("Компьютеров %d, в корпусе %d. Канал %d Мбит/с, можно %g. Диск %d ГБ." % (
-        COMPUTERS, PER_CORPUS, LINK_MBITS, allowed, DISK_BUDGET_GB))
-    print()
+    say("ШКОЛА: %d компьютеров, %d корпуса по %d. Канал %d Мбит/с, можно %g Мбит/с." % (
+        COMPUTERS, CORPUSES, PER_CORPUS, LINK_MBITS, allowed))
+    say("Доля времени урока, когда на кабинет смотрят: %d%%" % int(WATCH_SHARE * 100))
+    say()
 
-    print("КАНАЛ")
-    print("%-28s %10s %12s %14s" % ("сценарий", "кбит/с", "корпус", "живой просмотр"))
-    print("%-28s %10s %12s %14s" % ("", "на комп", "Мбит/с", "один комп"))
+    say("КАНАЛ НА ОДИН КОРПУС (%d компьютеров)" % PER_CORPUS)
+    say("%-28s %10s %12s %12s %10s" % ("сценарий", "кбит/с", "корпус", "доля от", "запас"))
+    say("%-28s %10s %12s %12s %10s" % ("", "на комп", "Мбит/с", "100 Мбит/с", ""))
     for name, busy in SCENARIOS.items():
-        day = day_bytes(SEND_STEP, busy)
+        day = archive_day_bytes(STORE_STEP, busy, WATCH_SHARE)
         kbits = day / seconds * 8 / 1000.0
         corpus = kbits * PER_CORPUS / 1000.0
-        live = live_rate(busy) * 8 / 1000.0
-        mark = "" if corpus <= allowed else "  ПРЕВЫШЕН"
-        print("%-28s %10.1f %12.2f %11.1f кбит/с%s" % (name, kbits, corpus, live, mark))
+        share = corpus * 100.0 / LINK_MBITS
+        mark = "есть" if corpus <= allowed else "ПРЕВЫШЕН"
+        say("%-28s %10.1f %12.2f %11.1f%% %10s" % (name, kbits, corpus, share, mark))
 
-    print()
-    print("ДИСК: сколько занимает запись одного учебного дня по мере старения")
-    print("%-28s %9s %9s %9s %9s %9s" % ("сценарий", "2 с", "4 с", "6 с", "8 с", "10 с"))
+    say()
+    say("ЖИВОЙ ПРОСМОТР СВЕРХ ЭТОГО")
+    one = live_rate() * 8 / 1000.0
+    say("  один компьютер, кадр раз в 1 с: %.0f кбит/с" % one)
+    say("  кабинет 18 машин, кадр раз в 2 с: %.2f Мбит/с" % (one / 2 * 18 / 1000.0))
+    say("  кабинет 30 машин, кадр раз в 2 с: %.2f Мбит/с" % (one / 2 * 30 / 1000.0))
+    say("  это добавляется только к тому корпусу, чей кабинет открыли")
+
+    say()
+    say("ДИСК: запись одного учебного дня всей школы по мере старения")
+    say("%-28s %9s %9s %9s %9s" % ("сценарий", "2 с", "4 с", "6 с", "8 с"))
     for name, busy in SCENARIOS.items():
-        row = ["%8.1f" % (day_bytes(step, busy) * COMPUTERS / 1e9) for step in (2, 4, 6, 8, 10)]
-        print("%-28s %s" % (name, " ".join(row)) + "  ГБ на всю школу")
+        row = []
+        for step in (2, 4, 6, 8):
+            value = archive_day_bytes(step, busy, WATCH_SHARE if step == 2 else 0.0)
+            row.append("%8.1f" % (value * COMPUTERS / 1e9))
+        say("%-28s %s  ГБ" % (name, " ".join(row)))
 
-    print()
-    print("ДИСК: сколько держится всего при вашем жизненном цикле")
-    print("Записи появляются только в учебные дни, %d в неделю, поэтому 6 недель это %d записей" % (
+    say()
+    say("ДИСК: сколько держится всего при сроке хранения в 4 недели")
+    say("Записи появляются только в учебные дни, %d в неделю: это %d записанных дней" % (
         SCHOOL_DAYS_PER_WEEK, sum(days for days, step, label in LIFECYCLE)))
-    print("%-28s %14s %16s %12s" % ("сценарий", "всего ГБ", "доля от 900 ГБ", "вердикт"))
+    say("%-28s %12s %14s %14s" % ("сценарий", "всего ГБ", "доля от 900", "вердикт"))
     for name, busy in SCENARIOS.items():
         total = 0.0
         for days, step, label in LIFECYCLE:
-            total += days * day_bytes(step, busy) * COMPUTERS / 1e9
+            watch = WATCH_SHARE if step == 2 else 0.0
+            total += days * archive_day_bytes(step, busy, watch) * COMPUTERS / 1e9
         share = total * 100.0 / DISK_BUDGET_GB
-        verdict = "влезает" if total <= DISK_BUDGET_GB else "НЕ ВЛЕЗАЕТ"
-        print("%-28s %12.0f %14.0f%% %14s" % (name, total, share, verdict))
+        verdict = "влезает" if total <= DISK_BUDGET_GB else "лишние дни удалятся"
+        say("%-28s %10.0f %13.0f%% %18s" % (name, total, share, verdict))
 
-    print()
-    print("Из чего складывается (сценарий «обычная работа»)")
+    say()
+    say("Из чего складывается (сценарий «обычная работа»)")
     busy = SCENARIOS["обычная работа"]
     running = 0.0
     for days, step, label in LIFECYCLE:
-        part = days * day_bytes(step, busy) * COMPUTERS / 1e9
+        watch = WATCH_SHARE if step == 2 else 0.0
+        part = days * archive_day_bytes(step, watch and busy or busy, watch) * COMPUTERS / 1e9
         running += part
-        print("  %-20s %2d дней по %2d с = %6.0f ГБ   накопительно %6.0f ГБ" % (
+        say("  %-16s %2d дней по %d с = %6.0f ГБ   накопительно %6.0f ГБ" % (
             label, days, step, part, running))
+
+    say()
+    say("ЖУРНАЛ ПОСЕЩЕНИЙ (бюджет %d ГБ)" % TRAFFIC_BUDGET_GB)
+    lessons = lesson_s / 60 // LESSON_MIN
+    per_day = VISITS_PER_LESSON * lessons * VISIT_BYTES * COMPUTERS
+    say("  %d записей за урок по %d байт, %d уроков: %.2f ГБ в день на школу" % (
+        VISITS_PER_LESSON, VISIT_BYTES, lessons, per_day / 1e9))
+    say("  за учебный год (%d дней): %.0f ГБ" % (
+        SCHOOL_DAYS_PER_WEEK * 35, per_day * SCHOOL_DAYS_PER_WEEK * 35 / 1e9))
+    say("  бюджета хватает на %.0f учебных дней" % (TRAFFIC_BUDGET_GB * 1e9 / per_day))
 
     return 0
 
