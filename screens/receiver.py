@@ -13,6 +13,8 @@ PORT = int(os.environ.get("DE_SCREEN_PORT", "9840"))
 
 MODES = {}
 QUEUES = {}
+RESULTS = {}
+COUNTER = {"value": 0}
 
 
 def read_secret():
@@ -87,7 +89,28 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self):
-        if self.path.rstrip("/") != "/frame":
+        route = self.path.rstrip("/")
+
+        if route == "/result":
+            secret = read_secret()
+            if not secret or self.headers.get("X-De-Secret") != secret:
+                self.reply(403, {"error": "bad secret"})
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 1024 * 1024:
+                self.reply(400, {"error": "bad length"})
+                return
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            except ValueError:
+                self.reply(400, {"error": "bad json"})
+                return
+            batch = str(payload.get("id", "")).split(":")[0]
+            RESULTS.setdefault(batch, []).append(payload)
+            self.reply(200, {"ok": True})
+            return
+
+        if route != "/frame":
             self.reply(404, {"error": "unknown path"})
             return
 
@@ -161,6 +184,42 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 time.sleep(0.5)
             self.reply(200, {"commands": []})
+            return
+
+        if parts[0] == "results" and len(parts) == 2:
+            batch = parts[1]
+            self.reply(200, {"batch": batch, "results": RESULTS.get(batch, [])})
+            return
+
+        if parts[0] == "batch":
+            secret = read_secret()
+            if not secret or self.headers.get("X-De-Secret") != secret:
+                self.reply(403, {"error": "bad secret"})
+                return
+            name = query.get("name", [""])[0]
+            logins = [safe_login(item) for item in query.get("login", [])]
+            if not name or not logins:
+                self.reply(400, {"error": "need name and login"})
+                return
+            COUNTER["value"] += 1
+            batch = "b%d-%d" % (int(time.time()), COUNTER["value"])
+            RESULTS[batch] = []
+            sent = []
+            for login in logins:
+                command = {"id": batch + ":" + login, "batch": batch, "name": name}
+                if "interval" in query:
+                    command["interval"] = int(query["interval"][0])
+                if "text" in query:
+                    command["text"] = query["text"][0]
+                if "delay" in query:
+                    command["delay"] = query["delay"][0]
+                QUEUES.setdefault(login, []).append(command)
+                sent.append(login)
+                if name == "live":
+                    MODES[login] = command.get("interval", 1)
+                if name == "archive":
+                    MODES.pop(login, None)
+            self.reply(200, {"ok": True, "batch": batch, "sent": sent})
             return
 
         if parts[0] == "command" and len(parts) == 2:

@@ -2,6 +2,7 @@
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -36,6 +37,9 @@ URL = CONFIG.get("DE_SCREEN_URL", "")
 SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
 MODE_FILE = CONFIG.get("DE_SCREEN_MODE_FILE", "/run/digital-examen/screen-mode")
 WAIT = int(CONFIG.get("DE_AGENT_WAIT", "25"))
+ALLOW_EXEC = CONFIG.get("DE_AGENT_ALLOW_EXEC", "1") == "1"
+EXEC_TIMEOUT = int(CONFIG.get("DE_AGENT_EXEC_TIMEOUT", "30"))
+EXEC_SHELL = CONFIG.get("DE_AGENT_EXEC_SHELL", "/bin/sh")
 LOG = CONFIG.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
 
 
@@ -85,6 +89,41 @@ def notify(text):
     )
 
 
+def send_result(command, code, output):
+    body = json.dumps({
+        "id": command.get("id"),
+        "login": read_login(),
+        "host": socket.gethostname(),
+        "name": command.get("name", ""),
+        "code": code,
+        "output": output[:20000],
+        "time": int(time.time()),
+    }).encode()
+
+    request = urllib.request.Request(URL.rstrip("/") + "/result", data=body)
+    request.add_header("Content-Type", "application/json")
+    request.add_header("X-De-Secret", read_secret())
+    try:
+        urllib.request.urlopen(request, timeout=20)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+        log("result not delivered for " + str(command.get("id")))
+
+
+def run_shell(line):
+    try:
+        process = subprocess.Popen(
+            [EXEC_SHELL, "-c", line],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        output = process.communicate(timeout=EXEC_TIMEOUT)[0]
+        return process.returncode, output.decode("utf-8", "replace")
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return 124, "превышено время выполнения"
+    except OSError as error:
+        return 1, str(error)
+
+
 def apply(command):
     name = command.get("name", "")
 
@@ -101,9 +140,43 @@ def apply(command):
     if name == "message":
         notify(str(command.get("text", "")))
         log("message shown")
+        send_result(command, 0, "показано")
+        return
+
+    if name == "exec":
+        line = str(command.get("text", ""))
+        if not ALLOW_EXEC:
+            log("exec refused by config")
+            send_result(command, 126, "выполнение команд запрещено в конфигурации")
+            return
+        log("exec: " + line[:200])
+        code, output = run_shell(line)
+        send_result(command, code, output)
+        return
+
+    if name == "shutdown":
+        delay = str(command.get("delay", "now"))
+        log("shutdown " + delay)
+        send_result(command, 0, "выключение " + delay)
+        subprocess.Popen(["/usr/sbin/shutdown", "-h", delay])
+        return
+
+    if name == "reboot":
+        delay = str(command.get("delay", "now"))
+        log("reboot " + delay)
+        send_result(command, 0, "перезагрузка " + delay)
+        subprocess.Popen(["/usr/sbin/shutdown", "-r", delay])
+        return
+
+    if name == "logout":
+        login = read_login()
+        log("logout " + login)
+        send_result(command, 0, "выход из сеанса " + login)
+        subprocess.Popen(["loginctl", "terminate-user", login])
         return
 
     log("unknown command " + name)
+    send_result(command, 127, "неизвестная команда " + name)
 
 
 def main():

@@ -49,6 +49,8 @@ BUDGET_KBITS = float(CONFIG.get("DE_SCREEN_BUDGET_KBITS", "12"))
 THUMB_WIDTH = int(CONFIG.get("DE_SCREEN_THUMB_WIDTH", "320"))
 THUMB_EVERY = int(CONFIG.get("DE_SCREEN_THUMB_EVERY", "4"))
 MODE_FILE = CONFIG.get("DE_SCREEN_MODE_FILE", "/run/digital-examen/screen-mode")
+COLORS = int(CONFIG.get("DE_SCREEN_COLORS", "8"))
+PALETTE = os.path.join(CONFIG.get("DE_SCREEN_WORK_DIR", "/run/digital-examen/screen"), "palette.png")
 
 COLS = WIDTH // TILE
 ROWS = HEIGHT // TILE
@@ -118,6 +120,22 @@ def tile_hashes(data):
     return out
 
 
+def palette_args():
+    if COLORS <= 0 or not os.path.exists(PALETTE):
+        return []
+    return ["+dither", "-remap", PALETTE]
+
+
+def make_palette():
+    if COLORS <= 0:
+        return
+    command = [
+        "magick", "-size", "%dx%d" % (WIDTH, HEIGHT), "-depth", "8", "rgb:" + RAW,
+        "-kmeans", str(COLORS), PALETTE,
+    ]
+    subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def encode_tile(index):
     col = index % COLS
     row = index // COLS
@@ -125,6 +143,7 @@ def encode_tile(index):
     command = [
         "magick", "-size", "%dx%d" % (WIDTH, HEIGHT), "-depth", "8", "rgb:" + RAW,
         "-crop", "%dx%d+%d+%d" % (TILE, TILE, col * TILE, row * TILE), "+repage",
+    ] + palette_args() + [
         "-quality", QUALITY, "webp:" + path,
     ]
     subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -137,6 +156,7 @@ def encode_full():
     path = os.path.join(WORK_DIR, "full.webp")
     command = [
         "magick", "-size", "%dx%d" % (WIDTH, HEIGHT), "-depth", "8", "rgb:" + RAW,
+    ] + palette_args() + [
         "-quality", QUALITY, "webp:" + path,
     ]
     subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -233,6 +253,7 @@ def main():
         thumb = b""
         try:
             if keyframe:
+                make_palette()
                 pieces = [[-1, encode_full()]]
             else:
                 for index in changed:

@@ -4,3 +4,4 @@ vk.com
 youtube.com
 .youtube.com
 .twitch.tv
+.discord.com

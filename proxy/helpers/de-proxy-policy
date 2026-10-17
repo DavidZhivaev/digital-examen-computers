@@ -7,7 +7,7 @@ import time
 POLICY_DIR = os.environ.get("DE_POLICY_DIR", "/etc/squid/policy")
 RELOAD_SECONDS = 20
 
-CACHE = {"loaded_at": 0, "classes": {}, "users": {}, "logins": {}, "school": []}
+CACHE = {"loaded_at": 0, "classes": {}, "users": {}, "logins": {}, "block": [], "never": []}
 
 
 def read_lines(path):
@@ -26,7 +26,8 @@ def load():
     if now - CACHE["loaded_at"] < RELOAD_SECONDS:
         return
     CACHE["loaded_at"] = now
-    CACHE["school"] = read_lines(os.path.join(POLICY_DIR, "school-allow.txt"))
+    CACHE["block"] = read_lines(os.path.join(POLICY_DIR, "school-block.txt"))
+    CACHE["never"] = read_lines(os.path.join(POLICY_DIR, "never-block.txt"))
 
     logins = {}
     for line in read_lines(os.path.join(POLICY_DIR, "login-class.txt")):
@@ -87,7 +88,10 @@ def apply_rule(rule, host):
 def decide(login, host):
     load()
 
-    if not in_list(host, CACHE["school"]):
+    if in_list(host, CACHE["never"]):
+        return True
+
+    if in_list(host, CACHE["block"]):
         return False
 
     personal = CACHE["users"].get(login.lower())
