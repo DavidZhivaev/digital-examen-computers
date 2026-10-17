@@ -1,9 +1,21 @@
-Cmnd_Alias DE_RECORDING = /usr/bin/systemctl stop de-screen*, \
-                          /usr/bin/systemctl disable de-screen*, \
-                          /usr/bin/systemctl mask de-screen*, \
-                          /usr/bin/systemctl kill de-screen*, \
-                          /bin/systemctl stop de-screen*, \
-                          /bin/systemctl disable de-screen*, \
-                          /bin/systemctl mask de-screen*, \
-                          /bin/systemctl kill de-screen*
-%de-keyholders ALL=(ALL) ALL, !DE_RECORDING
+Cmnd_Alias DE_RECORDING = /usr/bin/systemctl stop de-*, \
+                          /usr/bin/systemctl disable de-*, \
+                          /usr/bin/systemctl mask de-*, \
+                          /usr/bin/systemctl kill de-*, \
+                          /bin/systemctl stop de-*, \
+                          /bin/systemctl disable de-*, \
+                          /bin/systemctl mask de-*, \
+                          /bin/systemctl kill de-*
+
+Cmnd_Alias DE_SECRETS = /usr/bin/cat /etc/digital-examen/*.secret, \
+                        /bin/cat /etc/digital-examen/*.secret, \
+                        /usr/bin/cat /var/lib/digital-examen/secure/secrets/*, \
+                        /bin/cat /var/lib/digital-examen/secure/secrets/*, \
+                        /usr/local/sbin/de-encrypt, \
+                        /usr/bin/cryptsetup *, /sbin/cryptsetup *, /usr/sbin/cryptsetup *
+
+Cmnd_Alias DE_GUARDS = /usr/bin/visudo *, /usr/sbin/visudo *, \
+                       /usr/bin/tee /etc/sudoers.d/*, /bin/tee /etc/sudoers.d/*, \
+                       /usr/bin/tee /etc/pam.d/*, /bin/tee /etc/pam.d/*
+
+%de-keyholders ALL=(ALL) ALL, !DE_RECORDING, !DE_SECRETS, !DE_GUARDS

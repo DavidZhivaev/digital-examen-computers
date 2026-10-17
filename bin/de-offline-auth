@@ -67,9 +67,19 @@ def ask_vault(login, password):
         return None
 
 
-def role_allowed(role):
-    allowed = CONFIG.get("DE_ALLOW_ROLES", "1").split()
-    return str(role) in allowed
+def allowed_offline(found):
+    """Кого пускаем без интернета.
+
+    Ученика — если его роль разрешена и в обычном входе. Взрослого — только
+    если он предметник информатики: так решил пользователь, остальным взрослым
+    вход без интернета не нужен и опаснее.
+    """
+    scope = str(found.get("scope", ""))
+    if scope.startswith("informatics-"):
+        return True
+    if scope == "student":
+        return str(found.get("role", "")) in CONFIG.get("DE_ALLOW_ROLES", "1").split()
+    return False
 
 
 def mark_offline(canonical):
@@ -107,14 +117,14 @@ def main():
     if found is None:
         log("офлайн-вход отклонён: " + typed)
         return DENY
-    if not role_allowed(found.get("role", "")):
-        log("офлайн-вход: роль не допущена, " + typed)
+    if not allowed_offline(found):
+        log("офлайн-вход: не допущен по роли, " + typed)
         return DENY
 
     canonical = de_users.canonical_name(typed)
     done, note = de_users.prepare(CONFIG, typed, password, {
         "user_id": found.get("user_id", ""),
-        "person_id": found.get("person_id", ""),
+        "person_id": "",
         "role": found.get("role", ""),
         "informatics": found.get("informatics", ""),
         "offline": "1",

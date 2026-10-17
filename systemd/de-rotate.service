@@ -1,0 +1,7 @@
+[Unit]
+Description=Digital Examen смена секретов компьютера
+After=network-online.target de-secure.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/de-rotate

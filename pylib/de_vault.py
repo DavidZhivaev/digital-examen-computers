@@ -5,14 +5,17 @@ import json
 import os
 import time
 
-VERSION = 1
+VERSION = 2
+CHAIN = "bcrypt-scrypt-pbkdf2"
 
 DEFAULT_KDF = {
-    "scrypt_n": 16,
+    "scrypt_n": 17,
     "scrypt_r": 8,
     "scrypt_p": 1,
     "pbkdf2": 1200000,
 }
+
+MAX_MEMORY = 512 * 1024 * 1024
 
 
 def read_config(path="/etc/digital-examen/computers.conf"):
@@ -43,27 +46,70 @@ def same(first, second):
     return hmac.compare_digest(str(first), str(second))
 
 
-def base_verifier(password, salt, kdf=None):
+def bcrypt_hash(password, prefix):
+    """bcrypt от пароля с солью и стоимостью, которые дал сайт.
+
+    Сначала системный crypt: на МОС 12 он умеет $2b и считает на C. Если не
+    умеет — модуль bcrypt, который доставляет установка. Хеша пароля в
+    выгрузке нет, есть только эта соль, поэтому путь к проверке один:
+    посчитать bcrypt заново от того, что набрал человек.
+    """
+    if not prefix or not prefix.startswith("$2"):
+        return ""
+
+    try:
+        import crypt
+        out = crypt.crypt(password, prefix)
+        if out and out.startswith(prefix):
+            return out
+    except Exception:
+        pass
+
+    try:
+        import bcrypt
+        return bcrypt.hashpw(password.encode("utf-8"), prefix.encode("ascii")).decode("ascii")
+    except Exception:
+        return ""
+
+
+def stretch(bcrypt_value, salt, kdf=None):
     rules = dict(DEFAULT_KDF)
     if kdf:
         rules.update(kdf)
-    raw = password.encode("utf-8")
     seed = bytes.fromhex(salt) if isinstance(salt, str) else salt
     step = hashlib.scrypt(
-        raw,
+        bcrypt_value.encode("utf-8"),
         salt=seed,
         n=2 ** int(rules["scrypt_n"]),
         r=int(rules["scrypt_r"]),
         p=int(rules["scrypt_p"]),
-        maxmem=512 * 1024 * 1024,
+        maxmem=MAX_MEMORY,
         dklen=64,
     )
-    out = hashlib.pbkdf2_hmac("sha512", step, seed, int(rules["pbkdf2"]), 32)
-    return out.hex()
+    return hashlib.pbkdf2_hmac("sha512", step, seed, int(rules["pbkdf2"]), 32).hex()
 
 
 def bind_verifier(key, verifier):
     return hmac.new(bytes.fromhex(key), bytes.fromhex(verifier), hashlib.sha256).hexdigest()
+
+
+def password_matches(secret, entry, password):
+    """Тот ли пароль. Один прогон стоит примерно две секунды.
+
+    Порядок: bcrypt с солью сайта, затем scrypt на 128 МБ, затем 1 200 000
+    итераций pbkdf2, затем привязка к секрету этого компьютера. Любой из
+    шагов нельзя пропустить, поэтому перебор по украденной выгрузке стоит
+    столько же, сколько честная проверка.
+    """
+    if str(entry.get("chain", CHAIN)) != CHAIN:
+        return False
+
+    hashed = bcrypt_hash(password, str(entry.get("bcrypt", "")))
+    if not hashed:
+        return False
+
+    value = stretch(hashed, entry.get("salt", ""), entry.get("kdf"))
+    return same(bind_verifier(secret, value), entry.get("verifier", ""))
 
 
 def keystream(key, nonce, length):
@@ -148,3 +194,30 @@ def find_entry(bundle, login):
         if str(entry.get("login", "")).lower() == wanted:
             return entry
     return None
+
+
+def merge(bundle, part):
+    """Приложить присланные изменения к тому, что уже лежит на компьютере."""
+    if bundle is None or part.get("full"):
+        accounts = {}
+    else:
+        accounts = {}
+        for entry in bundle.get("accounts", []):
+            accounts[str(entry.get("login", "")).lower()] = entry
+
+    for entry in part.get("accounts", []):
+        accounts[str(entry.get("login", "")).lower()] = entry
+    for login in part.get("removed", []):
+        accounts.pop(str(login).lower(), None)
+
+    newest = 0
+    for entry in accounts.values():
+        newest = max(newest, int(entry.get("updated", 0) or 0))
+
+    return {
+        "version": VERSION,
+        "computer": part.get("computer", ""),
+        "made": int(part.get("made", time.time())),
+        "since": newest,
+        "accounts": list(accounts.values()),
+    }

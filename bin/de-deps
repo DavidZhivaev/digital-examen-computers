@@ -1,0 +1,141 @@
+#!/bin/sh
+
+# Проверка и доустановка всего, что системе нужно. Вызывается из run.sh и из
+# setup.sh. Если чего-то нет — ставим из интернета пакетным менеджером, какой
+# найдём. Рассказ о том, зачем каждая вещь, — в docs/install.md.
+
+say() {
+    echo "[deps] $1"
+}
+
+PM=""
+for candidate in apt-get dnf yum zypper pacman; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        PM="$candidate"
+        break
+    fi
+done
+
+REFRESHED=0
+
+refresh_index() {
+    [ "$REFRESHED" = "1" ] && return 0
+    REFRESHED=1
+    case "$PM" in
+        apt-get) apt-get update -qq >/dev/null 2>&1 || true ;;
+        zypper)  zypper --non-interactive refresh >/dev/null 2>&1 || true ;;
+        *) : ;;
+    esac
+}
+
+install_package() {
+    [ -z "$1" ] && return 1
+    [ -z "$PM" ] && return 1
+    refresh_index
+    say "ставлю пакет $1"
+    case "$PM" in
+        apt-get) DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$1" >/dev/null 2>&1 ;;
+        dnf)     dnf install -y -q "$1" >/dev/null 2>&1 ;;
+        yum)     yum install -y -q "$1" >/dev/null 2>&1 ;;
+        zypper)  zypper --non-interactive install -y "$1" >/dev/null 2>&1 ;;
+        pacman)  pacman -Sy --noconfirm "$1" >/dev/null 2>&1 ;;
+    esac
+}
+
+# need <что проверяем> <команда-проверка> <пакет для apt> <пакет для rpm> <пакет для pacman>
+need() {
+    label="$1"
+    check="$2"
+    deb="$3"
+    rpm="$4"
+    arch="$5"
+
+    if sh -c "$check" >/dev/null 2>&1; then
+        say "$label — есть"
+        return 0
+    fi
+
+    case "$PM" in
+        apt-get) want="$deb" ;;
+        pacman)  want="$arch" ;;
+        *)       want="$rpm" ;;
+    esac
+
+    install_package "$want"
+
+    if sh -c "$check" >/dev/null 2>&1; then
+        say "$label — поставлен"
+        return 0
+    fi
+
+    say "$label — НЕ НАЙДЕН, нужен пакет вроде $want"
+    return 1
+}
+
+MISSING=0
+note_missing() {
+    MISSING=`expr $MISSING + 1`
+}
+
+say "пакетный менеджер: ${PM:-не найден}"
+
+need "git"              "command -v git"                       git git git || note_missing
+need "python3"          "command -v python3"                   python3 python3 python || note_missing
+need "curl"             "command -v curl"                      curl curl curl || note_missing
+need "rsync"            "command -v rsync"                     rsync rsync rsync || note_missing
+need "ip"               "command -v ip"                        iproute2 iproute iproute2 || note_missing
+need "nft"              "command -v nft"                       nftables nftables nftables || note_missing
+need "setpriv"          "command -v setpriv"                   util-linux util-linux util-linux || note_missing
+need "ffmpeg"           "command -v ffmpeg"                    ffmpeg ffmpeg ffmpeg || note_missing
+need "ImageMagick"      "command -v magick || command -v convert" imagemagick ImageMagick imagemagick || note_missing
+need "systemd-nspawn"   "command -v systemd-nspawn"            systemd-container systemd-container systemd || note_missing
+need "cryptsetup"       "command -v cryptsetup"                cryptsetup cryptsetup cryptsetup || note_missing
+need "tpm2-tools"       "command -v tpm2_pcrread"              tpm2-tools tpm2.0-tools tpm2-tools || true
+need "sudo"             "command -v sudo"                      sudo sudo sudo || note_missing
+need "visudo"           "command -v visudo || test -x /usr/sbin/visudo" sudo sudo sudo || note_missing
+
+say "проверяю, чем считать bcrypt"
+if python3 - <<'PY' >/dev/null 2>&1
+import crypt
+out = crypt.crypt("x", "$2b$12$" + "a" * 22)
+raise SystemExit(0 if out and out.startswith("$2b$12$") else 1)
+PY
+then
+    say "bcrypt через системный crypt — есть"
+elif python3 -c "import bcrypt" >/dev/null 2>&1; then
+    say "bcrypt через модуль python — есть"
+else
+    need "модуль bcrypt" "python3 -c 'import bcrypt'" python3-bcrypt python3-bcrypt python-bcrypt || {
+        say "пробую через pip"
+        python3 -m pip install --quiet bcrypt >/dev/null 2>&1 || true
+    }
+    if python3 -c "import bcrypt" >/dev/null 2>&1; then
+        say "модуль bcrypt — поставлен"
+    else
+        say "bcrypt считать нечем: вход без интернета работать не будет"
+        note_missing
+    fi
+fi
+
+say "проверяю, что python умеет scrypt"
+if python3 -c "import hashlib, sys; sys.exit(0 if hasattr(hashlib, 'scrypt') else 1)" >/dev/null 2>&1; then
+    say "hashlib.scrypt — есть"
+else
+    say "hashlib.scrypt нет: вход без интернета работать не будет"
+    note_missing
+fi
+
+VERSION=`python3 -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>/dev/null`
+say "версия python: ${VERSION:-неизвестна}"
+case "$VERSION" in
+    3.6|3.7) say "ВНИМАНИЕ: нужен python 3.8 или новее"; note_missing ;;
+    *) : ;;
+esac
+
+if [ "$MISSING" != "0" ]; then
+    say "не хватает $MISSING обязательных вещей"
+    exit 1
+fi
+
+say "всё на месте"
+exit 0

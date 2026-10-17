@@ -1,0 +1,335 @@
+#!/usr/bin/python3
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, "/usr/local/lib/digital-examen")
+
+import de_vault
+
+CONFIG = de_vault.read_config()
+IMAGE = CONFIG.get("DE_SECURE_IMAGE", "/var/lib/digital-examen/secure.img")
+MOUNT = CONFIG.get("DE_SECURE_MOUNT", "/var/lib/digital-examen/secure")
+MAPPER = CONFIG.get("DE_SECURE_NAME", "de-secure")
+SIZE_GB = int(CONFIG.get("DE_SECURE_SIZE_GB", "8"))
+KEY_FILE = CONFIG.get("DE_SECURE_KEY_FILE", "/etc/digital-examen/secure.key")
+STATE_FILE = CONFIG.get("DE_SECURE_STATE_FILE", "/var/lib/digital-examen/secure.json")
+LOG = CONFIG.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
+
+ETC_DIR = CONFIG.get("DE_SECURE_ETC_DIR", "/etc/digital-examen")
+USERS_DIR = CONFIG.get("DE_SECURE_USERS_DIR", "/var/lib/digital-examen/users")
+
+MOVED = [
+    (os.path.join(ETC_DIR, "proxy.secret"), "secrets/proxy.secret"),
+    (os.path.join(ETC_DIR, "command.secret"), "secrets/command.secret"),
+    (os.path.join(ETC_DIR, "screen.secret"), "secrets/screen.secret"),
+    (os.path.join(ETC_DIR, "vault.secret"), "secrets/vault.secret"),
+    (CONFIG.get("DE_VAULT_DIR", "/var/lib/digital-examen/vault"), "vault"),
+    (CONFIG.get("DE_SCREEN_QUEUE_DIR", "/var/lib/digital-examen/screen-queue"), "screen-queue"),
+    (USERS_DIR, "users"),
+]
+
+
+def log(message):
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        out = open(LOG, "a")
+        out.write(stamp + " de-encrypt " + message + "\n")
+        out.close()
+    except IOError:
+        pass
+    sys.stdout.write(message + "\n")
+    sys.stdout.flush()
+
+
+def run(command, stdin_bytes=None):
+    process = subprocess.Popen(command, stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    output = process.communicate(input=stdin_bytes)[0]
+    return process.returncode, output.decode("utf-8", "replace")
+
+
+def have(tool):
+    return shutil.which(tool) is not None
+
+
+def tpm_present():
+    if not have("systemd-cryptenroll"):
+        return False
+    for device in ("/dev/tpmrm0", "/dev/tpm0"):
+        if os.path.exists(device):
+            return True
+    return False
+
+
+def read_state():
+    text = de_vault.read_text(STATE_FILE)
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except ValueError:
+        return {}
+
+
+def write_state(values):
+    folder = os.path.dirname(STATE_FILE)
+    os.makedirs(folder, exist_ok=True)
+    out = open(STATE_FILE, "w")
+    out.write(json.dumps(values, ensure_ascii=False))
+    out.close()
+    os.chmod(STATE_FILE, 0o600)
+
+
+def mapper_path():
+    return "/dev/mapper/" + MAPPER
+
+
+def loop_of_image():
+    code, output = run(["losetup", "-j", IMAGE])
+    if code != 0 or not output.strip():
+        return ""
+    return output.split(":")[0].strip()
+
+
+def attach_loop():
+    existing = loop_of_image()
+    if existing:
+        return existing
+    code, output = run(["losetup", "--find", "--show", IMAGE])
+    if code != 0:
+        log("не смог подключить файл: " + output.strip())
+        return ""
+    return output.strip()
+
+
+def is_mounted():
+    code, output = run(["findmnt", "--noheadings", "--target", MOUNT])
+    return code == 0 and MOUNT in output
+
+
+def make_key():
+    key = os.urandom(32)
+    folder = os.path.dirname(KEY_FILE)
+    os.makedirs(folder, exist_ok=True)
+    handle = os.open(KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.write(handle, key)
+    os.close(handle)
+    return key
+
+
+def create():
+    """Создать зашифрованный том и перенести в него всё чувствительное."""
+    if os.path.exists(IMAGE):
+        log("том уже создан")
+        return True
+
+    if not have("cryptsetup"):
+        log("нет cryptsetup, шифрование невозможно")
+        return False
+
+    os.makedirs(os.path.dirname(IMAGE), exist_ok=True)
+    log("создаю файл тома на %d ГБ" % SIZE_GB)
+    code, output = run(["truncate", "-s", "%dG" % SIZE_GB, IMAGE])
+    if code != 0:
+        log("не смог создать файл: " + output.strip())
+        return False
+    os.chmod(IMAGE, 0o600)
+
+    make_key()
+    device = attach_loop()
+    if not device:
+        return False
+
+    log("форматирую LUKS2")
+    code, output = run([
+        "cryptsetup", "luksFormat", "--type", "luks2", "--batch-mode",
+        "--pbkdf", "argon2id", "--key-file", KEY_FILE, device,
+    ])
+    if code != 0:
+        log("luksFormat не прошёл: " + output.strip())
+        return False
+
+    code, output = run(["cryptsetup", "open", "--key-file", KEY_FILE, device, MAPPER])
+    if code != 0:
+        log("не смог открыть том: " + output.strip())
+        return False
+
+    code, output = run(["mkfs.ext4", "-q", "-m", "0", mapper_path()])
+    if code != 0:
+        log("не смог сделать файловую систему: " + output.strip())
+        return False
+
+    os.makedirs(MOUNT, exist_ok=True)
+    code, output = run(["mount", mapper_path(), MOUNT])
+    if code != 0:
+        log("не смог подключить том: " + output.strip())
+        return False
+    os.chmod(MOUNT, 0o700)
+
+    seal_key()
+    move_in()
+    log("зашифрованный том готов")
+    return True
+
+
+def seal_key():
+    """Спрятать ключ в TPM, если он есть.
+
+    С TPM ключа на диске не остаётся вообще: том открывается микросхемой при
+    загрузке. Без TPM ключ приходится держать рядом с данными, и тогда
+    шифрование спасает только от выноса диска **без** системного раздела —
+    это честно пишется в состояние и видно на сайте.
+    """
+    state = read_state()
+    device = loop_of_image()
+
+    if tpm_present():
+        code, output = run([
+            "systemd-cryptenroll", "--tpm2-device=auto", "--tpm2-pcrs=7",
+            "--unlock-key-file=" + KEY_FILE, device,
+        ])
+        if code == 0:
+            try:
+                os.remove(KEY_FILE)
+            except OSError:
+                pass
+            state["key"] = "tpm2"
+            state["strong"] = True
+            log("ключ тома спрятан в TPM, файла ключа на диске нет")
+        else:
+            state["key"] = "file"
+            state["strong"] = False
+            log("TPM есть, но запечатать ключ не удалось: " + output.strip()[:200])
+    else:
+        state["key"] = "file"
+        state["strong"] = False
+        log("TPM не найден: ключ лежит в " + KEY_FILE + " — защита только от выноса диска отдельно от системного раздела")
+
+    state["image"] = IMAGE
+    state["mount"] = MOUNT
+    state["created_at"] = int(time.time())
+    write_state(state)
+
+
+def move_in():
+    """Перенести секреты и записи внутрь тома, оставив на их месте ссылки."""
+    for source, inside in MOVED:
+        target = os.path.join(MOUNT, inside)
+        if os.path.islink(source):
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+
+        if os.path.isdir(source):
+            os.makedirs(target, exist_ok=True)
+            for name in os.listdir(source):
+                shutil.move(os.path.join(source, name), os.path.join(target, name))
+            os.rmdir(source)
+        elif os.path.exists(source):
+            shutil.move(source, target)
+        else:
+            if inside.endswith(".secret"):
+                open(target, "a").close()
+                os.chmod(target, 0o600)
+            else:
+                os.makedirs(target, exist_ok=True)
+
+        os.chmod(target, 0o700 if os.path.isdir(target) else 0o600)
+        os.symlink(target, source)
+        log("перенесено в том: " + source)
+
+
+def unlock():
+    """Открыть и подключить том. Запускается при загрузке."""
+    if not os.path.exists(IMAGE):
+        return True
+    if is_mounted():
+        return True
+
+    device = attach_loop()
+    if not device:
+        return False
+
+    if not os.path.exists(mapper_path()):
+        state = read_state()
+        if state.get("key") == "tpm2":
+            code, output = run(["systemd-cryptsetup", "attach", MAPPER, device, "-",
+                                "tpm2-device=auto"])
+            if code != 0:
+                code, output = run(["cryptsetup", "open", "--token-only", device, MAPPER])
+        else:
+            code, output = run(["cryptsetup", "open", "--key-file", KEY_FILE, device, MAPPER])
+        if code != 0:
+            log("том не открылся: " + output.strip()[:200])
+            return False
+
+    os.makedirs(MOUNT, exist_ok=True)
+    code, output = run(["mount", mapper_path(), MOUNT])
+    if code != 0 and "already mounted" not in output:
+        log("том не подключился: " + output.strip()[:200])
+        return False
+
+    log("том открыт")
+    return True
+
+
+def status():
+    state = read_state()
+    out = {
+        "image": IMAGE,
+        "exists": os.path.exists(IMAGE),
+        "mounted": is_mounted(),
+        "key": state.get("key", ""),
+        "strong": bool(state.get("strong")),
+        "tpm": tpm_present(),
+        "size_gb": SIZE_GB,
+    }
+    sys.stdout.write(json.dumps(out, ensure_ascii=False) + "\n")
+    return 0
+
+
+def advice():
+    sys.stdout.write("""
+Полное шифрование системного раздела делается при подготовке образа, а не на
+живой машине: переразметка работающего компьютера на 1440 машинах — верный
+способ получить кирпичи. Правильный порядок один раз на образ:
+
+  1. при установке МОС 12 выбрать шифрование корневого раздела (LUKS2);
+  2. после установки привязать ключ к микросхеме TPM, чтобы не вводить пароль
+     при каждой загрузке:
+         systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 /dev/<раздел>
+  3. проверить, что пароль больше не спрашивается:
+         systemd-analyze blame | head
+
+Этот компьютер уже держит все секреты и записи в отдельном зашифрованном
+томе (de-encrypt status), поэтому вынос диска не отдаёт ни секретов машины,
+ни выгрузки учёток, ни кадров экрана.
+""")
+    return 0
+
+
+def main():
+    if os.geteuid() != 0:
+        sys.stderr.write("Запускать от root.\n")
+        return 1
+
+    action = sys.argv[1] if len(sys.argv) > 1 else "status"
+
+    if action == "status":
+        return status()
+    if action == "enable":
+        return 0 if create() else 1
+    if action == "unlock":
+        return 0 if unlock() else 1
+    if action == "root-advice":
+        return advice()
+
+    sys.stderr.write("usage: de-encrypt <status|enable|unlock|root-advice>\n")
+    return 2
+
+
+sys.exit(main())

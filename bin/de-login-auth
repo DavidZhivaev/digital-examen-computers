@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import socket
-import subprocess
 import sys
 import time
 import urllib.error
@@ -134,26 +133,6 @@ def token_payload(token):
         return {}
 
 
-def remember_for_offline(login, password, role, informatics):
-    """Запомнить пароль для входа без интернета.
-
-    Делается в отдельном процессе и без ожидания: медленная функция считается
-    около секунды, а задерживать на эту секунду каждый вход незачем.
-    """
-    if CONFIG.get("DE_OFFLINE_LOGIN", "1") != "1":
-        return
-    try:
-        process = subprocess.Popen(
-            ["/usr/local/sbin/de-vault", "remember", login, str(role), str(informatics)],
-            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        process.stdin.write(password.encode())
-        process.stdin.close()
-    except OSError as error:
-        log("не смог запомнить пароль для офлайна: " + str(error))
-
-
 def role_allowed(payload):
     allowed = CONFIG.get("DE_ALLOW_ROLES", "1").split()
     role = payload.get("role")
@@ -224,7 +203,6 @@ def main():
         note_attempt(typed, "denied")
         return DENY
 
-    remember_for_offline(canonical, password, payload.get("role", ""), informatics)
     note_attempt(typed, "ok")
     log("login ok as " + typed)
     return OK

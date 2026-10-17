@@ -132,6 +132,22 @@ def send_seen():
         pass
 
 
+def ask_offline_refresh():
+    """Попросить сайт досчитать значения для входа без интернета.
+
+    Считает их сайт — у него лежат bcrypt-хеши, и одна строка стоит около
+    секунды процессорного времени. Поэтому работа идёт порциями, и просим мы
+    её отсюда: приёмник и так ходит к сайту со своим серверным секретом.
+    """
+    limit = int(os.environ.get("DE_OFFLINE_REFRESH_LIMIT", "100"))
+    if limit <= 0:
+        return
+    try:
+        post("/api/computers/device/offline/refresh", {"limit": limit})
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as error:
+        sys.stdout.write("пересчёт офлайн-значений не запустился: %s\n" % error)
+
+
 def main():
     if not API_URL:
         return 0
@@ -139,6 +155,7 @@ def main():
     send_seen()
     for computer, folder in walk_records():
         send_record(computer, folder)
+    ask_offline_refresh()
     return 0
 
 

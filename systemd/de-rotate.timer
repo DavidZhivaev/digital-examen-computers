@@ -1,0 +1,10 @@
+[Unit]
+Description=Digital Examen смена секретов раз в месяц
+
+[Timer]
+OnCalendar=monthly
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

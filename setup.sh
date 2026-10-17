@@ -31,11 +31,12 @@ fail() {
 
 [ "`id -u`" = "0" ] || fail "запускайте от root: sudo sh setup.sh"
 
-for tool in /usr/sbin/useradd /usr/sbin/userdel /usr/sbin/chpasswd /usr/bin/python3 /usr/bin/getent; do
-    [ -x "$tool" ] || fail "не найден $tool"
-done
+say "проверяю и доставляю всё нужное"
+sh "$HERE/bin/de-deps" || fail "не хватает обязательных программ, смотрите строки [deps] выше"
 
-command -v git >/dev/null 2>&1 || fail "не найден git"
+for tool in useradd userdel chpasswd python3 getent; do
+    command -v "$tool" >/dev/null 2>&1 || [ -x "/usr/sbin/$tool" ] || fail "не найден $tool"
+done
 
 if [ "$HERE" != "$REPO_DIR" ]; then
     say "переношу репозиторий в $REPO_DIR"
@@ -70,7 +71,7 @@ done
 chmod 0750 "$LIB_DIR"
 
 say "ставлю скрипты в $BIN_DIR"
-for script in de-login-auth de-offline-auth de-vault de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen de-agent de-palette de-report de-policy de-keywatch de-traffic de-init de-update; do
+for script in de-deps de-encrypt de-rotate de-login-auth de-offline-auth de-vault de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen de-agent de-palette de-report de-policy de-keywatch de-traffic de-init de-update; do
     install -m 0750 -o root -g root "$HERE/bin/$script" "$BIN_DIR/$script"
 done
 install -m 0755 -o root -g root "$HERE/bin/de-session-start" /usr/local/bin/de-session-start
@@ -209,10 +210,11 @@ if ! grep -q "notingroup $GROUP" /etc/pam.d/login; then
 fi
 
 say "ставлю службы"
-for unit in de-cleanup.service de-screen.service de-agent.service de-keywatch.service de-traffic.service de-update.service de-update.timer de-vault-sync.service de-vault-sync.timer; do
+for unit in de-secure.service de-cleanup.service de-screen.service de-agent.service de-keywatch.service de-traffic.service de-update.service de-update.timer de-vault-sync.service de-vault-sync.timer de-rotate.service de-rotate.timer; do
     install -m 0644 -o root -g root "$HERE/systemd/$unit" "/etc/systemd/system/$unit"
 done
 systemctl daemon-reload
+systemctl enable de-secure.service
 systemctl enable de-cleanup.service
 systemctl enable de-screen.service
 systemctl enable de-agent.service
@@ -220,16 +222,13 @@ systemctl enable de-keywatch.service
 systemctl enable de-traffic.service
 systemctl enable de-update.timer
 systemctl enable de-vault-sync.timer
+systemctl enable de-rotate.timer
 
 say "проверяю, что есть всё для сетевого замка и песочницы"
-[ -x /usr/bin/ip ] || fail "не найден ip"
-[ -x /usr/sbin/nft ] || fail "не найден nft"
-[ -x /usr/bin/setpriv ] || fail "не найден setpriv"
-[ -x /usr/bin/rsync ] || fail "не найден rsync"
-[ -x /usr/bin/systemd-run ] || fail "не найден systemd-run"
-[ -x /usr/bin/systemd-nspawn ] || say "systemd-nspawn не найден, песочница de-box работать не будет"
-[ -x /usr/bin/ffmpeg ] || say "ffmpeg не найден, запись экрана работать не будет"
-command -v magick >/dev/null 2>&1 || say "magick не найден, запись экрана работать не будет"
+for tool in ip nft setpriv rsync systemd-run; do
+    command -v "$tool" >/dev/null 2>&1 || [ -x "/usr/sbin/$tool" ] || fail "не найден $tool"
+done
+command -v systemd-nspawn >/dev/null 2>&1 || say "systemd-nspawn не найден, песочница de-box работать не будет"
 
 say "проверяю конфиг sshd"
 /usr/sbin/sshd -t || fail "sshd не принял конфиг"
@@ -237,6 +236,7 @@ systemctl reload sshd >/dev/null 2>&1 || true
 
 if [ "$MODE" = "update" ]; then
     say "обновление применено, перезапускаю службы"
+    systemctl start de-secure.service >/dev/null 2>&1 || true
     for unit in de-screen de-agent de-keywatch de-traffic; do
         systemctl restart "$unit.service" >/dev/null 2>&1 || true
     done
@@ -244,6 +244,14 @@ if [ "$MODE" = "update" ]; then
     /usr/local/sbin/de-vault sync >/dev/null 2>&1 || true
     say "готово"
     exit 0
+fi
+
+say "включаю шифрование секретов и записей"
+if [ "${DE_SECURE_DISK:-1}" = "1" ]; then
+    "$BIN_DIR/de-encrypt" enable || say "шифрование не включилось, смотрите журнал"
+    "$BIN_DIR/de-encrypt" status
+else
+    say "шифрование выключено в конфиге (DE_SECURE_DISK=0)"
 fi
 
 say "ставлю компьютер на учёт"
@@ -256,6 +264,7 @@ for unit in de-cleanup de-screen de-agent de-keywatch de-traffic; do
 done
 systemctl start de-update.timer >/dev/null 2>&1 || true
 systemctl start de-vault-sync.timer >/dev/null 2>&1 || true
+systemctl start de-rotate.timer >/dev/null 2>&1 || true
 
 say "защищённые пользователи: $PROTECTED"
 say "готово, перезагружаюсь"

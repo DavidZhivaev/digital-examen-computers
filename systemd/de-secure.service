@@ -1,0 +1,15 @@
+[Unit]
+Description=Digital Examen зашифрованный том с секретами и записями
+DefaultDependencies=no
+After=local-fs.target systemd-udev-settle.service
+Before=de-screen.service de-agent.service de-traffic.service de-keywatch.service sddm.service
+Wants=local-fs.target
+RequiresMountsFor=/var/lib/digital-examen
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/de-encrypt unlock
+
+[Install]
+WantedBy=multi-user.target

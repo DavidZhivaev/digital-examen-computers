@@ -1,0 +1,102 @@
+#!/usr/bin/python3
+
+import json
+import os
+import ssl
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+sys.path.insert(0, "/usr/local/lib/digital-examen")
+
+import de_vault
+
+CONFIG = de_vault.read_config()
+API = CONFIG.get("DE_API_URL", "")
+COMPUTER = CONFIG.get("DE_COMPUTER_ID", "")
+LOG = CONFIG.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
+VAULT_DIR = CONFIG.get("DE_VAULT_DIR", "/var/lib/digital-examen/vault")
+
+FILES = {
+    "proxy_secret": CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret"),
+    "command_secret": CONFIG.get("DE_COMMAND_SECRET_FILE", "/etc/digital-examen/command.secret"),
+    "screen_secret": CONFIG.get("DE_SCREEN_SECRET_FILE", "/etc/digital-examen/screen.secret"),
+    "vault_secret": CONFIG.get("DE_VAULT_SECRET_FILE", "/etc/digital-examen/vault.secret"),
+}
+
+
+def log(message):
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        out = open(LOG, "a")
+        out.write(stamp + " de-rotate " + message + "\n")
+        out.close()
+    except IOError:
+        pass
+
+
+def build_opener():
+    ca = CONFIG.get("DE_SCREEN_CA", "")
+    if not ca or not os.path.exists(ca):
+        return urllib.request.build_opener()
+    context = ssl.create_default_context(cafile=ca)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+
+
+def write_secret(path, value):
+    if not value:
+        return False
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    out = open(path, "w")
+    out.write(value + "\n")
+    out.close()
+    os.chmod(path, 0o600)
+    return True
+
+
+def main():
+    if os.geteuid() != 0:
+        sys.stderr.write("Запускать от root.\n")
+        return 1
+    if not API or not COMPUTER:
+        log("компьютер не на учёте, менять нечего")
+        return 0
+
+    body = json.dumps({"computer": COMPUTER}).encode()
+    request = urllib.request.Request(API.rstrip("/") + "/api/computers/device/rotate", data=body)
+    request.add_header("Content-Type", "application/json")
+    request.add_header("X-De-Computer", COMPUTER)
+    request.add_header("X-De-Secret", de_vault.read_text(FILES["proxy_secret"]))
+
+    try:
+        answer = json.loads(build_opener().open(request, timeout=30).read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as error:
+        log("смена секретов не вышла: " + str(error))
+        return 1
+
+    changed = 0
+    for name, path in FILES.items():
+        if write_secret(path, answer.get(name, "")):
+            changed += 1
+
+    if changed != len(FILES):
+        log("получено секретов: %d из %d" % (changed, len(FILES)))
+        return 1
+
+    bundle = os.path.join(VAULT_DIR, "bundle.de")
+    if os.path.exists(bundle):
+        os.remove(bundle)
+    subprocess.call(["/usr/local/sbin/de-vault", "sync"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    log("секреты сменены, выгрузка перезабрана")
+    return 0
+
+
+sys.exit(main())

@@ -22,6 +22,7 @@ SECRETS_DIR = os.environ.get("DE_SECRETS_DIR", "/data/digital-examen/secrets")
 ALLOW_SHARED = os.environ.get("DE_ALLOW_SHARED_SECRET", "1") == "1"
 PORT = int(os.environ.get("DE_SCREEN_PORT", "9840"))
 MIN_FREE_GB = int(os.environ.get("DE_SCREEN_MIN_FREE_GB", "50"))
+SECRET_GRACE_SECONDS = int(os.environ.get("DE_SECRET_GRACE_HOURS", "24")) * 3600
 SPACE_EVERY = int(os.environ.get("DE_SCREEN_SPACE_EVERY", "200"))
 CONSOLE_WAIT = int(os.environ.get("DE_CONSOLE_WAIT", "45"))
 
@@ -47,8 +48,8 @@ def read_command_secret():
     return read_secret()
 
 
-def computer_secret(computer):
-    """Секрет именно этого компьютера.
+def computer_secrets(computer):
+    """Секреты именно этого компьютера: текущий и, пока идёт смена, прежний.
 
     Общий секрет на всю школу означал, что компьютер своим секретом мог
     прочитать кадры соседнего. Теперь у каждой машины свой, сайт приносит
@@ -58,11 +59,17 @@ def computer_secret(computer):
     name = safe_name(computer)
     path = os.path.join(SECRETS_DIR, name + ".json")
     if not name or not os.path.exists(path):
-        return ""
+        return []
     try:
-        return str(json.loads(open(path).read()).get("screen", ""))
+        values = json.loads(open(path).read())
     except (ValueError, OSError):
-        return ""
+        return []
+
+    out = [str(values.get("screen", ""))]
+    rotated = int(values.get("rotated", 0) or 0)
+    if values.get("previous") and time.time() - rotated <= SECRET_GRACE_SECONDS:
+        out.append(str(values["previous"]))
+    return [item for item in out if item]
 
 
 def save_computer_secrets(computer, values):
@@ -72,8 +79,19 @@ def save_computer_secrets(computer, values):
     os.makedirs(SECRETS_DIR, exist_ok=True)
     os.chmod(SECRETS_DIR, 0o700)
     path = os.path.join(SECRETS_DIR, name + ".json")
+    old = ""
+    if os.path.exists(path):
+        try:
+            old = str(json.loads(open(path).read()).get("screen", ""))
+        except (ValueError, OSError):
+            old = ""
+
     out = open(path + ".new", "w")
-    out.write(json.dumps({"screen": str(values.get("screen", ""))}))
+    out.write(json.dumps({
+        "screen": str(values.get("screen", "")),
+        "previous": old,
+        "rotated": int(time.time()),
+    }))
     out.close()
     os.chmod(path + ".new", 0o600)
     os.replace(path + ".new", path)
@@ -256,9 +274,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def allowed_computer(self, computer):
         sent = self.headers.get("X-De-Secret", "")
-        own = computer_secret(computer)
-        if own and same(sent, own):
-            return True
+        for own in computer_secrets(computer):
+            if same(sent, own):
+                return True
         if same(sent, read_command_secret()):
             return True
         if ALLOW_SHARED and same(sent, read_secret()):

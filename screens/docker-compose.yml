@@ -59,6 +59,7 @@ services:
       - ./command.secret:/run/secrets/command.secret:ro
     environment:
       DE_API_URL: "${DE_API_URL:-https://as.1580.ru}"
+      DE_OFFLINE_REFRESH_LIMIT: "${DE_OFFLINE_REFRESH_LIMIT:-100}"
     networks:
       - de-edge
 
