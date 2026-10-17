@@ -32,6 +32,7 @@ services:
     volumes:
       - /data/digital-examen/screens:/data/screens
       - ./proxy.secret:/run/secrets/proxy.secret:ro
+      - ./command.secret:/run/secrets/command.secret:ro
       - ./notify.secret:/run/secrets/notify.secret:ro
     environment:
       DE_API_URL: "${DE_API_URL:-https://as.1580.ru}"
@@ -53,6 +54,7 @@ services:
       - /data/digital-examen/screens:/data/screens:ro
       - /run/digital-examen/live:/run/digital-examen/live:ro
       - ./proxy.secret:/run/secrets/proxy.secret:ro
+      - ./command.secret:/run/secrets/command.secret:ro
     environment:
       DE_API_URL: "${DE_API_URL:-https://as.1580.ru}"
     networks:

@@ -22,7 +22,7 @@ MIN_FREE_GB = int(os.environ.get("DE_SCREEN_MIN_FREE_GB", "50"))
 NOTIFY_URL = os.environ.get("DE_NOTIFY_URL", "http://de-alerts:8099/notify")
 NOTIFY_SECRET_FILE = os.environ.get("DE_NOTIFY_SECRET_FILE", "/run/secrets/notify.secret")
 API_URL = os.environ.get("DE_API_URL", "")
-API_SECRET_FILE = os.environ.get("DE_SCREENS_SECRET_FILE", "/run/secrets/proxy.secret")
+API_SECRET_FILE = os.environ.get("DE_SCREENS_SECRET_FILE", "/run/secrets/command.secret")
 
 LADDER = ((28, "delete"), (21, 8), (14, 6), (0, 4))
 
@@ -54,7 +54,7 @@ def notify(text):
 
 
 def tell_site_dropped(day):
-    secret = read_file(API_SECRET_FILE)
+    secret = read_file(API_SECRET_FILE) or read_file("/run/secrets/proxy.secret")
     if not API_URL or not secret:
         return
     body = json.dumps({"day": day}).encode()

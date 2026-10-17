@@ -11,12 +11,14 @@ DATA_DIR = os.environ.get("DE_SCREEN_DATA", "/data/digital-examen/screens")
 LIVE_DIR = os.environ.get("DE_SCREEN_LIVE", "/run/digital-examen/live")
 SEEN_SECONDS = int(os.environ.get("DE_SEEN_SECONDS", "90"))
 API_URL = os.environ.get("DE_API_URL", "")
-SECRET_FILE = os.environ.get("DE_SCREENS_SECRET_FILE", "/run/secrets/proxy.secret")
+SECRET_FILE = os.environ.get("DE_SCREENS_SECRET_FILE", "/run/secrets/command.secret")
+FALLBACK_SECRET_FILE = os.environ.get("DE_SCREENS_FALLBACK_SECRET_FILE", "/run/secrets/proxy.secret")
 
 
 def read_secret():
-    if os.path.exists(SECRET_FILE):
-        return open(SECRET_FILE).read().strip()
+    for path in (SECRET_FILE, FALLBACK_SECRET_FILE):
+        if path and os.path.exists(path):
+            return open(path).read().strip()
     return os.environ.get("DE_SCREENS_SECRET", "")
 
 
