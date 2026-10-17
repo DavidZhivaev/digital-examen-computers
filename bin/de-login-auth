@@ -202,8 +202,7 @@ def create_user(config, login, password):
 
     command = [
         "/usr/sbin/useradd",
-        "--create-home",
-        "--skel", "/etc/skel",
+        "--no-create-home",
         "--home-dir", home,
         "--shell", shell,
         "--gid", group,
@@ -225,6 +224,27 @@ def create_user(config, login, password):
         run(["/usr/sbin/userdel", "--remove", "--force", login])
         return False, output
 
+    entry = pwd.getpwnam(login)
+    size = config.get("DE_HOME_TMPFS_SIZE", "2G")
+
+    if not os.path.isdir(home):
+        os.makedirs(home, 0o700)
+
+    options = "size=%s,mode=0700,uid=%d,gid=%d" % (size, entry.pw_uid, entry.pw_gid)
+    code, output = run(["/usr/bin/mount", "-t", "tmpfs", "-o", options, "tmpfs", home])
+    if code != 0:
+        run(["/usr/sbin/userdel", "--remove", "--force", login])
+        return False, output
+
+    code, output = run([
+        "/usr/bin/rsync", "-a",
+        "--chown=%d:%d" % (entry.pw_uid, entry.pw_gid),
+        "/etc/skel/", home + "/",
+    ])
+    if code != 0:
+        return False, output
+
+    os.chown(home, entry.pw_uid, entry.pw_gid)
     os.chmod(home, 0o700)
     return True, ""
 

@@ -1,0 +1,59 @@
+#!/bin/sh
+
+CONFIG_FILE=/etc/digital-examen/computers.conf
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+GROUP="${DE_USER_GROUP:-de-students}"
+BASE="${DE_BOX_BASE:-/var/lib/digital-examen/box-base}"
+LOG="${DE_LOG_FILE:-/var/log/digital-examen-computers.log}"
+SHELL_IN_BOX="${DE_BOX_SHELL:-/bin/bash}"
+
+write_log() {
+    echo "`date '+%Y-%m-%d %H:%M:%S'` de-box $1" >> "$LOG"
+}
+
+[ -z "$SUDO_UID" ] && exit 1
+
+NAME=`getent passwd "$SUDO_UID" | cut -d: -f1`
+[ -z "$NAME" ] && exit 1
+
+if [ "`id -gn \"$NAME\"`" != "$GROUP" ]; then
+    write_log "refused: $NAME is not in $GROUP"
+    exit 1
+fi
+
+NS="de-$NAME"
+if ! ip netns list | grep -qx "$NS"; then
+    write_log "refused: namespace $NS is missing"
+    exit 1
+fi
+
+if [ ! -d "$BASE" ]; then
+    echo "Песочница не установлена: нет $BASE" >&2
+    exit 1
+fi
+
+HOME_DIR=`getent passwd "$NAME" | cut -d: -f6`
+WORK="/run/digital-examen/box-$NAME"
+UPPER="$WORK/upper"
+WORKDIR="$WORK/work"
+ROOT="$WORK/root"
+
+mkdir -p "$UPPER" "$WORKDIR" "$ROOT"
+mountpoint -q "$ROOT" || mount -t overlay overlay \
+    -o "lowerdir=$BASE,upperdir=$UPPER,workdir=$WORKDIR" "$ROOT"
+
+write_log "box for $NAME starts inside $NS"
+
+exec systemd-nspawn \
+    --quiet \
+    --directory="$ROOT" \
+    --network-namespace-path="/run/netns/$NS" \
+    --private-users=pick \
+    --private-users-ownership=auto \
+    --bind="$HOME_DIR:$HOME_DIR" \
+    --setenv=HOME="$HOME_DIR" \
+    --setenv=http_proxy="$http_proxy" \
+    --setenv=https_proxy="$https_proxy" \
+    --chdir="$HOME_DIR" \
+    "$SHELL_IN_BOX"

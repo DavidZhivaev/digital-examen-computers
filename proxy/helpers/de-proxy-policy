@@ -7,7 +7,7 @@ import time
 POLICY_DIR = os.environ.get("DE_POLICY_DIR", "/etc/squid/policy")
 RELOAD_SECONDS = 20
 
-CACHE = {"loaded_at": 0, "classes": {}, "logins": {}, "school": []}
+CACHE = {"loaded_at": 0, "classes": {}, "users": {}, "logins": {}, "school": []}
 
 
 def read_lines(path):
@@ -36,20 +36,29 @@ def load():
     CACHE["logins"] = logins
 
     classes = {}
-    for name in os.listdir(POLICY_DIR) if os.path.isdir(POLICY_DIR) else []:
-        if not name.startswith("class-") or not name.endswith(".txt"):
+    users = {}
+    names = os.listdir(POLICY_DIR) if os.path.isdir(POLICY_DIR) else []
+    for name in names:
+        if not name.endswith(".txt"):
             continue
-        class_id = name[len("class-"):-len(".txt")]
-        lines = read_lines(os.path.join(POLICY_DIR, name))
+        if name.startswith("class-"):
+            key = name[len("class-"):-len(".txt")]
+            target = classes
+        elif name.startswith("user-"):
+            key = name[len("user-"):-len(".txt")].lower()
+            target = users
+        else:
+            continue
         mode = "deny"
         domains = []
-        for line in lines:
+        for line in read_lines(os.path.join(POLICY_DIR, name)):
             if line.startswith("mode "):
                 mode = line.split(None, 1)[1].strip()
                 continue
             domains.append(line)
-        classes[class_id] = (mode, domains)
+        target[key] = (mode, domains)
     CACHE["classes"] = classes
+    CACHE["users"] = users
 
 
 def matches(host, pattern):
@@ -68,11 +77,22 @@ def in_list(host, patterns):
     return False
 
 
+def apply_rule(rule, host):
+    mode, domains = rule
+    if mode == "allow":
+        return in_list(host, domains)
+    return not in_list(host, domains)
+
+
 def decide(login, host):
     load()
 
     if not in_list(host, CACHE["school"]):
         return False
+
+    personal = CACHE["users"].get(login.lower())
+    if personal is not None:
+        return apply_rule(personal, host)
 
     class_id = CACHE["logins"].get(login.lower())
     if class_id is None:
@@ -82,10 +102,7 @@ def decide(login, host):
     if rule is None:
         return True
 
-    mode, domains = rule
-    if mode == "allow":
-        return in_list(host, domains)
-    return not in_list(host, domains)
+    return apply_rule(rule, host)
 
 
 for line in sys.stdin:

@@ -1,0 +1,4 @@
+mode allow
+.1580.ru
+uchebnik.mos.ru
+codeforces.com

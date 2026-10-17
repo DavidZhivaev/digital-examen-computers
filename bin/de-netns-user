@@ -1,0 +1,92 @@
+#!/bin/sh
+
+CONFIG_FILE=/etc/digital-examen/computers.conf
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+ACTION="$1"
+LOGIN="$2"
+
+GROUP="${DE_USER_GROUP:-de-students}"
+PORT="${DE_RELAY_PORT:-3128}"
+LOW="${DE_MIN_UID:-20000}"
+LOG="${DE_LOG_FILE:-/var/log/digital-examen-computers.log}"
+
+write_log() {
+    echo "`date '+%Y-%m-%d %H:%M:%S'` de-netns-user $1" >> "$LOG"
+}
+
+[ -z "$LOGIN" ] && exit 1
+
+USER_UID=`id -u "$LOGIN" 2>/dev/null`
+[ -z "$USER_UID" ] && exit 1
+
+OFFSET=$((USER_UID - LOW))
+[ "$OFFSET" -lt 0 ] && exit 1
+[ "$OFFSET" -gt 4095 ] && exit 1
+
+THIRD=$((OFFSET / 64))
+FOURTH=$(((OFFSET % 64) * 4))
+
+NS="de-$LOGIN"
+HOST_IF="deh$OFFSET"
+GUEST_IF="deg$OFFSET"
+HOST_IP="10.77.$THIRD.$((FOURTH + 1))"
+GUEST_IP="10.77.$THIRD.$((FOURTH + 2))"
+TABLE="de_box_$OFFSET"
+
+if [ "$ACTION" = "ip" ]; then
+    echo "$HOST_IP"
+    exit 0
+fi
+
+if [ "$ACTION" = "down" ]; then
+    systemctl stop "de-relay-$LOGIN.service" >/dev/null 2>&1
+    nft delete table inet "$TABLE" 2>/dev/null
+    ip netns list | grep -qx "$NS" && ip netns delete "$NS"
+    ip link show "$HOST_IF" >/dev/null 2>&1 && ip link delete "$HOST_IF"
+    rm -rf "/etc/netns/$NS"
+    write_log "namespace $NS removed"
+    exit 0
+fi
+
+if [ "$ACTION" != "up" ]; then
+    exit 1
+fi
+
+ip netns list | grep -qx "$NS" && exit 0
+
+ip link show "$HOST_IF" >/dev/null 2>&1 && ip link delete "$HOST_IF"
+
+ip netns add "$NS"
+ip link add "$HOST_IF" type veth peer name "$GUEST_IF"
+ip link set "$GUEST_IF" netns "$NS"
+
+ip addr add "$HOST_IP/30" dev "$HOST_IF"
+ip link set "$HOST_IF" up
+
+ip netns exec "$NS" ip addr add "$GUEST_IP/30" dev "$GUEST_IF"
+ip netns exec "$NS" ip link set "$GUEST_IF" up
+ip netns exec "$NS" ip link set lo up
+ip netns exec "$NS" ip route add default via "$HOST_IP"
+ip netns exec "$NS" sysctl -q -w net.ipv6.conf.all.disable_ipv6=1
+ip netns exec "$NS" sysctl -q -w net.ipv6.conf.default.disable_ipv6=1
+
+mkdir -p "/etc/netns/$NS"
+echo "options timeout:1 attempts:1" > "/etc/netns/$NS/resolv.conf"
+chmod 0644 "/etc/netns/$NS/resolv.conf"
+
+nft delete table inet "$TABLE" 2>/dev/null
+nft add table inet "$TABLE"
+nft add chain inet "$TABLE" input "{ type filter hook input priority 0 ; policy accept ; }"
+nft add chain inet "$TABLE" forward "{ type filter hook forward priority 0 ; policy accept ; }"
+nft add rule inet "$TABLE" input iifname "$HOST_IF" ip daddr "$HOST_IP" tcp dport "$PORT" accept
+nft add rule inet "$TABLE" input iifname "$HOST_IF" drop
+nft add rule inet "$TABLE" forward iifname "$HOST_IF" drop
+nft add rule inet "$TABLE" forward oifname "$HOST_IF" drop
+
+systemctl stop "de-relay-$LOGIN.service" >/dev/null 2>&1
+systemd-run --quiet --unit="de-relay-$LOGIN" --property=Restart=always --property=RestartSec=2 \
+    /usr/local/sbin/de-proxy-relay "$LOGIN" "$HOST_IP"
+
+write_log "namespace $NS up, login $LOGIN, only $HOST_IP:$PORT reachable"
+exit 0

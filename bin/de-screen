@@ -1,0 +1,219 @@
+#!/usr/bin/python3
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import zlib
+
+CONFIG_FILE = "/etc/digital-examen/computers.conf"
+LOGIN_FILE = "/run/digital-examen/current-login"
+
+
+def read_config():
+    values = {}
+    if not os.path.exists(CONFIG_FILE):
+        return values
+    data = open(CONFIG_FILE)
+    for line in data:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[name.strip()] = value
+    data.close()
+    return values
+
+
+CONFIG = read_config()
+URL = CONFIG.get("DE_SCREEN_URL", "")
+WIDTH = int(CONFIG.get("DE_SCREEN_WIDTH", "1280"))
+HEIGHT = int(CONFIG.get("DE_SCREEN_HEIGHT", "720"))
+TILE = int(CONFIG.get("DE_SCREEN_TILE", "80"))
+QUALITY = CONFIG.get("DE_SCREEN_QUALITY", "50")
+KEY_EVERY = int(CONFIG.get("DE_SCREEN_KEYFRAME_EVERY", "40"))
+KEY_SHARE = int(CONFIG.get("DE_SCREEN_KEYFRAME_SHARE", "30"))
+WORK_DIR = CONFIG.get("DE_SCREEN_WORK_DIR", "/run/digital-examen/screen")
+SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
+
+COLS = WIDTH // TILE
+ROWS = HEIGHT // TILE
+RAW = os.path.join(WORK_DIR, "frame.rgb")
+
+
+def read_login():
+    if not os.path.exists(LOGIN_FILE):
+        return ""
+    return open(LOGIN_FILE).read().strip()
+
+
+def read_secret():
+    if not os.path.exists(SECRET_FILE):
+        return ""
+    return open(SECRET_FILE).read().strip()
+
+
+def grab():
+    command = [
+        "ffmpeg", "-loglevel", "error",
+        "-f", "x11grab", "-i", os.environ.get("DISPLAY", ":0"),
+        "-frames:v", "1",
+        "-vf", "scale=%d:%d" % (WIDTH, HEIGHT),
+        "-pix_fmt", "rgb24", "-f", "rawvideo", "-y", RAW,
+    ]
+    subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return open(RAW, "rb").read()
+
+
+def tile_hashes(data):
+    out = []
+    stride = WIDTH * 3
+    width_bytes = TILE * 3
+    for row in range(ROWS):
+        for col in range(COLS):
+            value = 0
+            left = col * width_bytes
+            for y in range(row * TILE, row * TILE + TILE):
+                start = y * stride + left
+                value = zlib.crc32(data[start:start + width_bytes], value)
+            out.append(value)
+    return out
+
+
+def encode_tile(index):
+    col = index % COLS
+    row = index // COLS
+    path = os.path.join(WORK_DIR, "t%d.webp" % index)
+    command = [
+        "magick", "-size", "%dx%d" % (WIDTH, HEIGHT), "-depth", "8", "rgb:" + RAW,
+        "-crop", "%dx%d+%d+%d" % (TILE, TILE, col * TILE, row * TILE), "+repage",
+        "-quality", QUALITY, "webp:" + path,
+    ]
+    subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    data = open(path, "rb").read()
+    os.remove(path)
+    return data
+
+
+def encode_full():
+    path = os.path.join(WORK_DIR, "full.webp")
+    command = [
+        "magick", "-size", "%dx%d" % (WIDTH, HEIGHT), "-depth", "8", "rgb:" + RAW,
+        "-quality", QUALITY, "webp:" + path,
+    ]
+    subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    data = open(path, "rb").read()
+    os.remove(path)
+    return data
+
+
+def send(login, frame_no, keyframe, pieces):
+    header = {
+        "version": 1,
+        "login": login,
+        "frame": frame_no,
+        "time": int(time.time()),
+        "size": [WIDTH, HEIGHT],
+        "grid": [COLS, ROWS],
+        "tile": TILE,
+        "keyframe": keyframe,
+        "pieces": [[index, len(blob)] for index, blob in pieces],
+    }
+    body = json.dumps(header).encode() + b"\n"
+    for index, blob in pieces:
+        body += blob
+
+    request = urllib.request.Request(URL.rstrip("/") + "/frame", data=body)
+    request.add_header("Content-Type", "application/octet-stream")
+    request.add_header("X-De-Login", login)
+    request.add_header("X-De-Secret", read_secret())
+    answer = urllib.request.urlopen(request, timeout=20)
+    return json.loads(answer.read().decode("utf-8"))
+
+
+def main():
+    if not URL:
+        return 0
+
+    os.makedirs(WORK_DIR, exist_ok=True)
+    os.chmod(WORK_DIR, 0o700)
+
+    previous = None
+    frame_no = 0
+    since_key = 0
+    interval = int(CONFIG.get("DE_SCREEN_INTERVAL", "15"))
+    total = COLS * ROWS
+
+    while True:
+        started = time.time()
+        login = read_login()
+
+        if not login:
+            previous = None
+            time.sleep(interval)
+            continue
+
+        try:
+            data = grab()
+        except (subprocess.CalledProcessError, OSError):
+            time.sleep(interval)
+            continue
+
+        current = tile_hashes(data)
+
+        if previous is None:
+            changed = list(range(total))
+        else:
+            changed = [i for i in range(total) if previous[i] != current[i]]
+
+        keyframe = False
+        if previous is None or since_key >= KEY_EVERY:
+            keyframe = True
+        if len(changed) * 100 >= total * KEY_SHARE:
+            keyframe = True
+
+        pieces = []
+        try:
+            if keyframe:
+                pieces = [[-1, encode_full()]]
+            else:
+                for index in changed:
+                    pieces.append([index, encode_tile(index)])
+        except (subprocess.CalledProcessError, OSError):
+            time.sleep(interval)
+            continue
+
+        if not pieces:
+            previous = current
+            since_key += 1
+            time.sleep(max(1, interval - (time.time() - started)))
+            continue
+
+        try:
+            answer = send(login, frame_no, keyframe, pieces)
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+            previous = None
+            time.sleep(interval)
+            continue
+
+        previous = current
+        frame_no += 1
+        since_key = 0 if keyframe else since_key + 1
+
+        wanted = answer.get("interval")
+        if wanted:
+            interval = max(1, int(wanted))
+
+        rest = interval - (time.time() - started)
+        if rest > 0:
+            time.sleep(rest)
+
+
+sys.exit(main())

@@ -59,6 +59,18 @@ remove_user() {
     [ -n "$alias_name" ] && kill_sessions "$alias_name"
     sleep 1
 
+    /usr/local/sbin/de-netns-user down "$name" >/dev/null 2>&1
+
+    box="/run/digital-examen/box-$name"
+    mountpoint -q "$box/root" && umount "$box/root"
+    rm -rf "$box"
+    rm -f "/run/digital-examen/login-$name"
+
+    if [ -n "$home" ]; then
+        mountpoint -q "$home" && umount "$home"
+        mountpoint -q "$home" && umount -l "$home"
+    fi
+
     if [ -n "$alias_name" ] && getent passwd "$alias_name" >/dev/null 2>&1; then
         /usr/sbin/userdel --force "$alias_name" >/dev/null 2>&1
         write_log "removed alias $alias_name"

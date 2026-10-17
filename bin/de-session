@@ -24,6 +24,8 @@ if [ "$PAM_TYPE" = "close_session" ]; then
     write_log "session closed for $LOGIN"
     if [ "${DE_WIPE_ON_LOGOUT:-1}" = "1" ]; then
         /usr/local/sbin/de-cleanup "$LOGIN" >/dev/null 2>&1 &
+    else
+        /usr/local/sbin/de-netns-user down "$LOGIN" >/dev/null 2>&1 &
     fi
     exit 0
 fi

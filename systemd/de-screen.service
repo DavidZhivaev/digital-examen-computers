@@ -1,0 +1,12 @@
+[Unit]
+Description=Digital Examen screen tiles sender
+After=de-netns.service
+
+[Service]
+ExecStart=/usr/local/sbin/de-screen
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

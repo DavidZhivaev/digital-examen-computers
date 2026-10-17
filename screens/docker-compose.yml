@@ -1,0 +1,17 @@
+services:
+  de-screens:
+    build: .
+    image: de-screens:latest
+    container_name: de-screens
+    restart: unless-stopped
+    ports:
+      - "10.171.219.221:9840:9840"
+    volumes:
+      - /data/digital-examen/screens:/data/screens
+      - ./proxy.secret:/etc/digital-examen/proxy.secret:ro
+    networks:
+      - de-edge
+
+networks:
+  de-edge:
+    external: true

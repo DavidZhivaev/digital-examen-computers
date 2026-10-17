@@ -38,7 +38,7 @@ chmod 0755 "$CONFIG_DIR"
 chmod 0700 "$STATE_DIR"
 
 say "ставлю скрипты в $BIN_DIR"
-for script in de-login-auth de-session de-cleanup de-netns-up de-netns-down de-proxy-relay de-enter-net; do
+for script in de-login-auth de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen; do
     install -m 0750 -o root -g root "$HERE/bin/$script" "$BIN_DIR/$script"
 done
 install -m 0755 -o root -g root "$HERE/bin/de-session-start" /usr/local/bin/de-session-start
@@ -62,6 +62,9 @@ echo "DE_PROTECTED_USERS=\"$PROTECTED\"" >> "$TMP_CONFIG"
 cat "$TMP_CONFIG" > "$CONFIG_FILE"
 rm -f "$TMP_CONFIG"
 chmod 0640 "$CONFIG_FILE"
+
+say "создаю каталог базы песочницы"
+mkdir -p "${DE_BOX_BASE:-/var/lib/digital-examen/box-base}"
 
 say "создаю группу $GROUP"
 getent group "$GROUP" >/dev/null 2>&1 || /usr/sbin/groupadd --system "$GROUP"
@@ -148,18 +151,22 @@ if ! grep -q "notingroup $GROUP" /etc/pam.d/login; then
 fi
 
 say "ставлю службы"
-for unit in de-cleanup.service de-netns.service de-proxy-relay.service; do
+for unit in de-cleanup.service de-screen.service; do
     install -m 0644 -o root -g root "$HERE/systemd/$unit" "/etc/systemd/system/$unit"
 done
 systemctl daemon-reload
 systemctl enable de-cleanup.service
-systemctl enable de-netns.service
-systemctl enable de-proxy-relay.service
+systemctl enable de-screen.service
 
-say "проверяю, что есть всё для сетевого замка"
+say "проверяю, что есть всё для сетевого замка и песочницы"
 [ -x /usr/bin/ip ] || fail "не найден ip"
 [ -x /usr/sbin/nft ] || fail "не найден nft"
 [ -x /usr/bin/setpriv ] || fail "не найден setpriv"
+[ -x /usr/bin/rsync ] || fail "не найден rsync"
+[ -x /usr/bin/systemd-run ] || fail "не найден systemd-run"
+[ -x /usr/bin/systemd-nspawn ] || say "systemd-nspawn не найден, песочница de-box работать не будет"
+[ -x /usr/bin/ffmpeg ] || say "ffmpeg не найден, запись экрана работать не будет"
+command -v magick >/dev/null 2>&1 || say "magick не найден, запись экрана работать не будет"
 
 say "проверяю конфиг sshd"
 /usr/sbin/sshd -t || fail "sshd не принял конфиг"

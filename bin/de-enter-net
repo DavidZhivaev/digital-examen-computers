@@ -3,7 +3,6 @@
 CONFIG_FILE=/etc/digital-examen/computers.conf
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
 
-NS="${DE_NETNS:-de-student}"
 GROUP="${DE_USER_GROUP:-de-students}"
 SESSION="${DE_SESSION_COMMAND:-/usr/bin/startplasma-x11}"
 LOG="${DE_LOG_FILE:-/var/log/digital-examen-computers.log}"
@@ -23,6 +22,10 @@ if [ "`id -gn \"$NAME\"`" != "$GROUP" ]; then
     exit 1
 fi
 
+NS="de-$NAME"
+
+/usr/local/sbin/de-netns-user up "$NAME" || exit 1
+
 if ! ip netns list | grep -qx "$NS"; then
     write_log "namespace $NS is missing, session refused"
     exit 1
@@ -30,6 +33,7 @@ fi
 
 mkdir -p /run/digital-examen
 chmod 0755 /run/digital-examen
+echo "$NAME" > "/run/digital-examen/login-$NAME"
 echo "$NAME" > /run/digital-examen/current-login
 chmod 0644 /run/digital-examen/current-login
 

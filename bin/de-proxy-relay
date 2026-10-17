@@ -4,6 +4,7 @@ import base64
 import os
 import socket
 import socketserver
+import sys
 import threading
 
 CONFIG_FILE = "/etc/digital-examen/computers.conf"
@@ -29,7 +30,8 @@ def read_config():
 
 
 CONFIG = read_config()
-HOST_IP = CONFIG.get("DE_NETNS_HOST_IP", "10.77.0.1")
+LOGIN = sys.argv[1] if len(sys.argv) > 1 else ""
+HOST_IP = sys.argv[2] if len(sys.argv) > 2 else CONFIG.get("DE_NETNS_HOST_IP", "10.77.0.1")
 PORT = int(CONFIG.get("DE_RELAY_PORT", "3128"))
 UP_HOST = CONFIG.get("DE_SCHOOL_PROXY_HOST", "")
 UP_FALLBACK = CONFIG.get("DE_SCHOOL_PROXY_FALLBACK", "")
@@ -44,6 +46,8 @@ def read_secret():
 
 
 def read_login():
+    if LOGIN:
+        return LOGIN
     if not os.path.exists(LOGIN_FILE):
         return ""
     return open(LOGIN_FILE).read().strip()
