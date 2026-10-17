@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=XSession
+Exec=/usr/local/bin/de-session-start
+TryExec=/usr/local/bin/de-session-start
+DesktopNames=KDE
+Name=Digital Examen
+Name[ru]=Цифровой экзамен
+Comment=Plasma session with school proxy
+Comment[ru]=Сеанс Plasma со школьным прокси

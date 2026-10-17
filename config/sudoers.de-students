@@ -1,0 +1,2 @@
+Defaults!/usr/local/sbin/de-enter-net env_keep += "DISPLAY XAUTHORITY LANG LC_ALL XDG_SEAT XDG_VTNR XDG_SESSION_ID XDG_SESSION_TYPE XDG_SESSION_CLASS XDG_CURRENT_DESKTOP DBUS_SESSION_BUS_ADDRESS"
+%de-students ALL=(root) NOPASSWD: /usr/local/sbin/de-enter-net

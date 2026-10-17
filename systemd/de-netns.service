@@ -1,0 +1,14 @@
+[Unit]
+Description=Digital Examen student network namespace
+After=network-online.target
+Wants=network-online.target
+Before=sddm.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/de-netns-up
+ExecStop=/usr/local/sbin/de-netns-down
+
+[Install]
+WantedBy=multi-user.target

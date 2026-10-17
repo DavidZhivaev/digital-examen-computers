@@ -1,0 +1,13 @@
+#!/bin/sh
+
+CONFIG_FILE=/etc/digital-examen/computers.conf
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+GROUP="${DE_USER_GROUP:-de-students}"
+SESSION="${DE_SESSION_COMMAND:-/usr/bin/startplasma-x11}"
+
+if [ "`id -gn`" != "$GROUP" ]; then
+    exec "$SESSION"
+fi
+
+exec sudo -E -n /usr/local/sbin/de-enter-net

@@ -1,0 +1,153 @@
+#!/usr/bin/python3
+
+import base64
+import os
+import socket
+import socketserver
+import threading
+
+CONFIG_FILE = "/etc/digital-examen/computers.conf"
+LOGIN_FILE = "/run/digital-examen/current-login"
+
+
+def read_config():
+    values = {}
+    if not os.path.exists(CONFIG_FILE):
+        return values
+    data = open(CONFIG_FILE)
+    for line in data:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[name.strip()] = value
+    data.close()
+    return values
+
+
+CONFIG = read_config()
+HOST_IP = CONFIG.get("DE_NETNS_HOST_IP", "10.77.0.1")
+PORT = int(CONFIG.get("DE_RELAY_PORT", "3128"))
+UP_HOST = CONFIG.get("DE_SCHOOL_PROXY_HOST", "")
+UP_FALLBACK = CONFIG.get("DE_SCHOOL_PROXY_FALLBACK", "")
+UP_PORT = int(CONFIG.get("DE_SCHOOL_PROXY_PORT", "3128"))
+SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
+
+
+def read_secret():
+    if not os.path.exists(SECRET_FILE):
+        return ""
+    return open(SECRET_FILE).read().strip()
+
+
+def read_login():
+    if not os.path.exists(LOGIN_FILE):
+        return ""
+    return open(LOGIN_FILE).read().strip()
+
+
+def credentials():
+    login = read_login()
+    secret = read_secret()
+    if not login or not secret:
+        return ""
+    pair = (login + ":" + secret).encode()
+    return base64.b64encode(pair).decode()
+
+
+def connect_upstream():
+    last = None
+    for host in (UP_HOST, UP_FALLBACK):
+        if not host:
+            continue
+        try:
+            return socket.create_connection((host, UP_PORT), timeout=10)
+        except OSError as error:
+            last = error
+    raise last if last else OSError("no upstream configured")
+
+
+def rewrite_head(head, token):
+    lines = head.split(b"\r\n")
+    kept = [lines[0]]
+    for line in lines[1:]:
+        if line.lower().startswith(b"proxy-authorization:"):
+            continue
+        if line.lower().startswith(b"proxy-connection:"):
+            continue
+        kept.append(line)
+    kept.insert(1, b"Proxy-Authorization: Basic " + token.encode())
+    return b"\r\n".join(kept)
+
+
+def pipe(source, target):
+    try:
+        while True:
+            chunk = source.recv(65536)
+            if not chunk:
+                break
+            target.sendall(chunk)
+    except OSError:
+        pass
+    try:
+        target.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+
+
+class Handler(socketserver.BaseRequestHandler):
+
+    def handle(self):
+        client = self.request
+        client.settimeout(30)
+
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = client.recv(4096)
+            if not chunk:
+                return
+            head += chunk
+            if len(head) > 65536:
+                return
+
+        token = credentials()
+        if not token:
+            client.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+            return
+
+        split = head.index(b"\r\n\r\n")
+        rest = head[split + 4:]
+        new_head = rewrite_head(head[:split], token)
+
+        try:
+            upstream = connect_upstream()
+        except OSError:
+            client.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+            return
+
+        upstream.settimeout(None)
+        client.settimeout(None)
+
+        try:
+            upstream.sendall(new_head + b"\r\n\r\n" + rest)
+        except OSError:
+            upstream.close()
+            return
+
+        first = threading.Thread(target=pipe, args=(client, upstream))
+        first.daemon = True
+        first.start()
+        pipe(upstream, client)
+        first.join(timeout=5)
+        upstream.close()
+
+
+class Server(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+Server((HOST_IP, PORT), Handler).serve_forever()

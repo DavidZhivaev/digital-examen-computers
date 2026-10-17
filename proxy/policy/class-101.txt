@@ -1,0 +1,6 @@
+mode deny
+vk.com
+.vk.com
+youtube.com
+.youtube.com
+.twitch.tv

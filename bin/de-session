@@ -1,0 +1,31 @@
+#!/bin/sh
+
+CONFIG_FILE=/etc/digital-examen/computers.conf
+STATE_DIR=/var/lib/digital-examen/users
+
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+LOGIN="$PAM_USER"
+LOG="${DE_LOG_FILE:-/var/log/digital-examen-computers.log}"
+
+write_log() {
+    echo "`date '+%Y-%m-%d %H:%M:%S'` de-session $1" >> "$LOG"
+}
+
+[ -z "$LOGIN" ] && exit 0
+[ ! -f "$STATE_DIR/$LOGIN" ] && exit 0
+
+if [ "$PAM_TYPE" = "open_session" ]; then
+    write_log "session opened for $LOGIN"
+    exit 0
+fi
+
+if [ "$PAM_TYPE" = "close_session" ]; then
+    write_log "session closed for $LOGIN"
+    if [ "${DE_WIPE_ON_LOGOUT:-1}" = "1" ]; then
+        /usr/local/sbin/de-cleanup "$LOGIN" >/dev/null 2>&1 &
+    fi
+    exit 0
+fi
+
+exit 0

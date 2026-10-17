@@ -1,0 +1,16 @@
+[Unit]
+Description=Digital Examen temporary users cleanup
+After=local-fs.target
+Before=sddm.service
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/de-cleanup
+ExecStop=/usr/local/sbin/de-cleanup
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

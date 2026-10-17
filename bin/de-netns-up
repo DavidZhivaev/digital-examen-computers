@@ -1,0 +1,63 @@
+#!/bin/sh
+
+CONFIG_FILE=/etc/digital-examen/computers.conf
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+NS="${DE_NETNS:-de-student}"
+HOST_IF="${DE_NETNS_HOST_IF:-de-host}"
+GUEST_IF="${DE_NETNS_GUEST_IF:-de-net}"
+HOST_IP="${DE_NETNS_HOST_IP:-10.77.0.1}"
+GUEST_IP="${DE_NETNS_GUEST_IP:-10.77.0.2}"
+PREFIX="${DE_NETNS_PREFIX:-30}"
+PORT="${DE_RELAY_PORT:-3128}"
+LOG="${DE_LOG_FILE:-/var/log/digital-examen-computers.log}"
+
+write_log() {
+    echo "`date '+%Y-%m-%d %H:%M:%S'` de-netns-up $1" >> "$LOG"
+}
+
+ip netns list | grep -qx "$NS" && ip netns delete "$NS"
+ip link show "$HOST_IF" >/dev/null 2>&1 && ip link delete "$HOST_IF"
+
+ip netns add "$NS"
+ip link add "$HOST_IF" type veth peer name "$GUEST_IF"
+ip link set "$GUEST_IF" netns "$NS"
+
+ip addr add "$HOST_IP/$PREFIX" dev "$HOST_IF"
+ip link set "$HOST_IF" up
+
+ip netns exec "$NS" ip addr add "$GUEST_IP/$PREFIX" dev "$GUEST_IF"
+ip netns exec "$NS" ip link set "$GUEST_IF" up
+ip netns exec "$NS" ip link set lo up
+ip netns exec "$NS" ip route add default via "$HOST_IP"
+
+ip netns exec "$NS" sysctl -q -w net.ipv6.conf.all.disable_ipv6=1
+ip netns exec "$NS" sysctl -q -w net.ipv6.conf.default.disable_ipv6=1
+
+mkdir -p "/etc/netns/$NS"
+echo "options timeout:1 attempts:1" > "/etc/netns/$NS/resolv.conf"
+chmod 0644 "/etc/netns/$NS/resolv.conf"
+
+nft delete table inet de_box 2>/dev/null
+
+nft add table inet de_box
+nft add chain inet de_box input "{ type filter hook input priority 0 ; policy accept ; }"
+nft add chain inet de_box forward "{ type filter hook forward priority 0 ; policy accept ; }"
+
+nft add rule inet de_box input iifname "$HOST_IF" ip daddr "$HOST_IP" tcp dport "$PORT" accept
+nft add rule inet de_box input iifname "$HOST_IF" ip protocol icmp accept
+nft add rule inet de_box input iifname "$HOST_IF" drop
+
+nft add rule inet de_box forward iifname "$HOST_IF" drop
+nft add rule inet de_box forward oifname "$HOST_IF" drop
+
+LOW="${DE_MIN_UID:-20000}"
+HIGH="${DE_MAX_UID:-29999}"
+
+nft add chain inet de_box output "{ type filter hook output priority 0 ; policy accept ; }"
+nft add rule inet de_box output oifname "lo" accept
+nft add rule inet de_box output meta skuid "$LOW-$HIGH" ip daddr "$HOST_IP" accept
+nft add rule inet de_box output meta skuid "$LOW-$HIGH" drop
+
+write_log "namespace $NS ready, only $HOST_IP:$PORT reachable"
+exit 0

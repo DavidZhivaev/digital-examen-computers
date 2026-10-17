@@ -1,0 +1,21 @@
+services:
+  de-proxy:
+    build: .
+    image: de-proxy:latest
+    container_name: de-proxy
+    restart: unless-stopped
+    ports:
+      - "10.171.219.221:3128:3128"
+    volumes:
+      - ./policy:/etc/squid/policy:ro
+      - ./proxy.secret:/etc/squid/proxy.secret:ro
+      - de-proxy-logs:/var/log/squid
+    networks:
+      - de-edge
+
+volumes:
+  de-proxy-logs:
+
+networks:
+  de-edge:
+    external: true

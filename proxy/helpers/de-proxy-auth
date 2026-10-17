@@ -1,0 +1,42 @@
+#!/usr/bin/python3
+
+import base64
+import os
+import sys
+
+SECRET_FILE = os.environ.get("DE_PROXY_SECRET_FILE", "/etc/squid/proxy.secret")
+
+
+def read_secret():
+    if not os.path.exists(SECRET_FILE):
+        return ""
+    return open(SECRET_FILE).read().strip()
+
+
+def unquote(text):
+    out = ""
+    index = 0
+    while index < len(text):
+        if text[index] == "%" and index + 2 < len(text):
+            out += chr(int(text[index + 1:index + 3], 16))
+            index += 3
+            continue
+        out += text[index]
+        index += 1
+    return out
+
+
+for line in sys.stdin:
+    parts = line.strip().split(" ")
+    if len(parts) < 2:
+        sys.stdout.write("ERR\n")
+        sys.stdout.flush()
+        continue
+    login = unquote(parts[0])
+    password = unquote(parts[1])
+    secret = read_secret()
+    if secret and password == secret and login:
+        sys.stdout.write("OK user=" + login + "\n")
+    else:
+        sys.stdout.write("ERR\n")
+    sys.stdout.flush()

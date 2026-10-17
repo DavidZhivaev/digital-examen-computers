@@ -1,0 +1,329 @@
+#!/usr/bin/python3
+
+import hashlib
+import json
+import os
+import pwd
+import re
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+CONFIG_FILE = "/etc/digital-examen/computers.conf"
+STATE_DIR = "/var/lib/digital-examen/users"
+
+OK = 0
+DENY = 1
+SKIP = 2
+
+
+def read_config():
+    values = {}
+    if not os.path.exists(CONFIG_FILE):
+        return values
+    data = open(CONFIG_FILE)
+    for line in data:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[name.strip()] = value
+    data.close()
+    return values
+
+
+def log(config, message):
+    path = config.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        out = open(path, "a")
+        out.write(stamp + " de-login-auth " + message + "\n")
+        out.close()
+    except IOError:
+        pass
+
+
+def read_password():
+    data = sys.stdin.buffer.read()
+    if data.endswith(b"\x00"):
+        data = data[:-1]
+    return data.decode("utf-8", "replace").rstrip("\n")
+
+
+def canonical_name(login):
+    return login.lower()
+
+
+def login_is_safe(login, config):
+    low = int(config.get("DE_LOGIN_MIN_LENGTH", "3"))
+    high = int(config.get("DE_LOGIN_MAX_LENGTH", "31"))
+    if len(login) < low or len(login) > high:
+        return False
+    return re.match(r"^[a-z][a-z0-9_-]*$", canonical_name(login)) is not None
+
+
+def user_is_protected(login, config):
+    names = config.get("DE_PROTECTED_USERS", "root").split()
+    lowered = [name.lower() for name in names]
+    return login in names or canonical_name(login) in lowered
+
+
+def user_exists(login):
+    try:
+        pwd.getpwnam(login)
+        return True
+    except KeyError:
+        return False
+
+
+def leading_zero_bits(digest):
+    bits = 0
+    for byte in digest:
+        if byte == 0:
+            bits += 8
+            continue
+        bits += 8 - byte.bit_length()
+        break
+    return bits
+
+
+def solve_pow(challenge_id, nonce, difficulty):
+    prefix = (challenge_id + nonce).encode()
+    number = 0
+    while number < 100000000:
+        digest = hashlib.sha256(prefix + str(number).encode()).digest()
+        if leading_zero_bits(digest) >= difficulty:
+            return str(number)
+        number += 1
+    return None
+
+
+def post_json(url, body, timeout):
+    data = json.dumps(body).encode()
+    request = urllib.request.Request(url, data=data)
+    request.add_header("Content-Type", "application/json")
+    request.add_header("User-Agent", "digital-examen-computers")
+    answer = urllib.request.urlopen(request, timeout=timeout)
+    return json.loads(answer.read().decode("utf-8"))
+
+
+def ask_challenge(config):
+    url = config.get("DE_API_URL", "").rstrip("/") + "/auth/pow/challenge"
+    timeout = int(config.get("DE_API_TIMEOUT", "10"))
+    return post_json(url, {"platform": "desktop"}, timeout)
+
+
+def ask_login(config, login, password, challenge):
+    url = config.get("DE_API_URL", "").rstrip("/") + "/auth/login"
+    timeout = int(config.get("DE_API_TIMEOUT", "10"))
+    device = config.get("DE_DEVICE_NAME", "")
+    if not device:
+        device = socket.gethostname()
+    body = {
+        "login": login,
+        "password": password,
+        "device_name": device,
+        "client_type": "web",
+        "pow_challenge_id": challenge["challenge_id"],
+        "pow_solution": challenge["solution"],
+    }
+    return post_json(url, body, timeout)
+
+
+def token_payload(token):
+    parts = token.split(".")
+    if len(parts) != 3:
+        return {}
+    body = parts[1]
+    body = body + "=" * (-len(body) % 4)
+    try:
+        import base64
+        return json.loads(base64.urlsafe_b64decode(body.encode()).decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def check_site(config, login, password):
+    challenge = ask_challenge(config)
+    solution = solve_pow(challenge["challenge_id"], challenge["nonce"], challenge["difficulty"])
+    if solution is None:
+        return None, "pow_failed"
+    challenge["solution"] = solution
+    answer = ask_login(config, login, password, challenge)
+    token = answer.get("access_token", "")
+    return token_payload(token), "ok"
+
+
+def role_allowed(payload, config):
+    allowed = config.get("DE_ALLOW_ROLES", "1").split()
+    role = payload.get("role")
+    if role is None:
+        return False
+    return str(role) in allowed
+
+
+def run(command, stdin_text=None):
+    data = None
+    if stdin_text is not None:
+        data = stdin_text.encode()
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    output = process.communicate(input=data)[0]
+    return process.returncode, output.decode("utf-8", "replace")
+
+
+def create_alias(login, canonical):
+    entry = pwd.getpwnam(canonical)
+    command = [
+        "/usr/sbin/useradd",
+        "--no-create-home",
+        "--non-unique",
+        "--uid", str(entry.pw_uid),
+        "--gid", str(entry.pw_gid),
+        "--home-dir", entry.pw_dir,
+        "--shell", entry.pw_shell,
+        "--comment", "digital-examen alias",
+        login,
+    ]
+    return run(command)
+
+
+def create_user(config, login, password):
+    group = config.get("DE_USER_GROUP", "de-students")
+    shell = config.get("DE_USER_SHELL", "/bin/bash")
+    home = os.path.join(config.get("DE_HOME_BASE", "/home"), login)
+    low = config.get("DE_MIN_UID", "20000")
+    high = config.get("DE_MAX_UID", "29999")
+
+    command = [
+        "/usr/sbin/useradd",
+        "--create-home",
+        "--skel", "/etc/skel",
+        "--home-dir", home,
+        "--shell", shell,
+        "--gid", group,
+        "--key", "UID_MIN=" + low,
+        "--key", "UID_MAX=" + high,
+        "--comment", "digital-examen",
+    ]
+    extra = config.get("DE_EXTRA_GROUPS", "")
+    if extra:
+        command = command + ["--groups", extra]
+    command.append(login)
+
+    code, output = run(command)
+    if code != 0:
+        return False, output
+
+    code, output = run(["/usr/sbin/chpasswd"], login + ":" + password + "\n")
+    if code != 0:
+        run(["/usr/sbin/userdel", "--remove", "--force", login])
+        return False, output
+
+    os.chmod(home, 0o700)
+    return True, ""
+
+
+def save_state(canonical, typed, payload):
+    if not os.path.isdir(STATE_DIR):
+        os.makedirs(STATE_DIR, 0o700)
+    alias = ""
+    if typed != canonical:
+        alias = typed
+    lines = [
+        "login=" + canonical,
+        "typed=" + typed,
+        "alias=" + alias,
+        "uid=" + str(pwd.getpwnam(canonical).pw_uid),
+        "created_at=" + str(int(time.time())),
+        "user_id=" + str(payload.get("sub", "")),
+        "person_id=" + str(payload.get("person_id", "")),
+        "role=" + str(payload.get("role", "")),
+    ]
+    path = os.path.join(STATE_DIR, canonical)
+    out = open(path, "w")
+    out.write("\n".join(lines) + "\n")
+    out.close()
+    os.chmod(path, 0o600)
+
+
+def state_exists(login):
+    return os.path.exists(os.path.join(STATE_DIR, canonical_name(login)))
+
+
+def main():
+    config = read_config()
+    typed = os.environ.get("PAM_USER", "")
+
+    if not typed:
+        return SKIP
+    if user_is_protected(typed, config):
+        return SKIP
+    if not config.get("DE_API_URL"):
+        log(config, "no api url in config")
+        return SKIP
+
+    canonical = canonical_name(typed)
+
+    if user_exists(typed) and not state_exists(typed):
+        return SKIP
+    if user_exists(canonical) and not state_exists(canonical):
+        return SKIP
+    if not login_is_safe(typed, config):
+        log(config, "login rejected by pattern: " + typed)
+        return SKIP
+
+    password = read_password()
+    if not password:
+        return DENY
+
+    try:
+        payload, note = check_site(config, canonical, password)
+    except urllib.error.HTTPError as error:
+        log(config, "site refused " + canonical + " http " + str(error.code))
+        return DENY
+    except (urllib.error.URLError, socket.timeout, ValueError) as error:
+        log(config, "site unreachable for " + canonical + ": " + str(error))
+        return DENY
+
+    if payload is None:
+        log(config, "pow not solved for " + canonical)
+        return DENY
+    if not role_allowed(payload, config):
+        log(config, "role not allowed for " + canonical)
+        return DENY
+
+    if not user_exists(canonical):
+        done, output = create_user(config, canonical, password)
+        if not done:
+            log(config, "useradd failed for " + canonical + ": " + output)
+            return DENY
+        log(config, "user created: " + canonical)
+
+    if typed != canonical and not user_exists(typed):
+        code, output = create_alias(typed, canonical)
+        if code != 0:
+            log(config, "alias failed for " + typed + ": " + output)
+            return DENY
+        log(config, "alias created: " + typed + " -> " + canonical)
+
+    names = [canonical]
+    if typed != canonical:
+        names.append(typed)
+    for name in names:
+        code, output = run(["/usr/sbin/chpasswd"], name + ":" + password + "\n")
+        if code != 0:
+            log(config, "chpasswd failed for " + name + ": " + output)
+            return DENY
+
+    save_state(canonical, typed, payload)
+    log(config, "login ok as " + typed)
+    return OK
+
+
+sys.exit(main())
