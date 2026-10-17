@@ -42,6 +42,7 @@ PROXY_SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/prox
 COMMAND_SECRET_FILE = CONFIG.get("DE_COMMAND_SECRET_FILE", "/etc/digital-examen/command.secret")
 SCREEN_SECRET_FILE = CONFIG.get("DE_SCREEN_SECRET_FILE", "/etc/digital-examen/screen.secret")
 VAULT_SECRET_FILE = CONFIG.get("DE_VAULT_SECRET_FILE", "/etc/digital-examen/vault.secret")
+AI_SECRET_FILE = CONFIG.get("DE_AI_SECRET_FILE", "/etc/digital-examen/ai.secret")
 KEY_FILE_NAME = CONFIG.get("DE_KEY_FILE", "de-key.txt")
 
 
@@ -224,6 +225,7 @@ def main():
     write_secret(COMMAND_SECRET_FILE, created.get("command_secret", ""))
     write_secret(SCREEN_SECRET_FILE, created.get("screen_secret", ""))
     write_secret(VAULT_SECRET_FILE, created.get("vault_secret", ""))
+    write_secret(AI_SECRET_FILE, created.get("ai_secret", ""))
 
     write_config({
         "DE_COMPUTER_ID": created.get("computer", name),

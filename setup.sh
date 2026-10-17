@@ -162,7 +162,8 @@ for SECRET_FILE in \
     "${DE_PROXY_SECRET_FILE:-/etc/digital-examen/proxy.secret}" \
     "${DE_COMMAND_SECRET_FILE:-/etc/digital-examen/command.secret}" \
     "${DE_SCREEN_SECRET_FILE:-/etc/digital-examen/screen.secret}" \
-    "${DE_VAULT_SECRET_FILE:-/etc/digital-examen/vault.secret}"; do
+    "${DE_VAULT_SECRET_FILE:-/etc/digital-examen/vault.secret}" \
+    "${DE_AI_SECRET_FILE:-/etc/digital-examen/ai.secret}"; do
     [ -f "$SECRET_FILE" ] || touch "$SECRET_FILE"
     chmod 0600 "$SECRET_FILE"
     chown root:root "$SECRET_FILE"
