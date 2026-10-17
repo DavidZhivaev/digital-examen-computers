@@ -17,11 +17,13 @@ write_log() {
 
 if [ "$PAM_TYPE" = "open_session" ]; then
     write_log "session opened for $LOGIN"
+    /usr/local/sbin/de-report start "$LOGIN" >/dev/null 2>&1 &
     exit 0
 fi
 
 if [ "$PAM_TYPE" = "close_session" ]; then
     write_log "session closed for $LOGIN"
+    /usr/local/sbin/de-report end "$LOGIN" >/dev/null 2>&1
     if [ "${DE_WIPE_ON_LOGOUT:-1}" = "1" ]; then
         /usr/local/sbin/de-cleanup "$LOGIN" >/dev/null 2>&1 &
     else

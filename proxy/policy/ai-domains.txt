@@ -1,0 +1,17 @@
+chat.openai.com
+chatgpt.com
+.claude.ai
+gemini.google.com
+bard.google.com
+aistudio.google.com
+lens.google.com
+copilot.microsoft.com
+.perplexity.ai
+.deepseek.com
+.mistral.ai
+alice.yandex.ru
+ya.ru/alice
+yandex.ru/neuro
+.gigachat.ru
+.you.com
+.phind.com

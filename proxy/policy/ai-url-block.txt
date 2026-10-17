@@ -1,0 +1,4 @@
+google.* /search udm=50
+google.* /search udm=ai
+gstatic.com /_/mss/search-next/ .aim.
+google.* /_/SearchNextAimUi

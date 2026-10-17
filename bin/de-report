@@ -1,0 +1,116 @@
+#!/usr/bin/python3
+
+import json
+import os
+import socket
+import sys
+import time
+import urllib.error
+import urllib.request
+
+CONFIG_FILE = "/etc/digital-examen/computers.conf"
+STATE_DIR = "/run/digital-examen"
+
+
+def read_config():
+    values = {}
+    if not os.path.exists(CONFIG_FILE):
+        return values
+    data = open(CONFIG_FILE)
+    for line in data:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        value = value.strip()
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[name.strip()] = value
+    data.close()
+    return values
+
+
+CONFIG = read_config()
+API = CONFIG.get("DE_API_URL", "")
+SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
+LOG = CONFIG.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
+QUEUE = os.path.join(STATE_DIR, "report-queue.jsonl")
+
+
+def log(message):
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        out = open(LOG, "a")
+        out.write(stamp + " de-report " + message + "\n")
+        out.close()
+    except IOError:
+        pass
+
+
+def read_secret():
+    if not os.path.exists(SECRET_FILE):
+        return ""
+    return open(SECRET_FILE).read().strip()
+
+
+def post(payload):
+    url = API.rstrip("/") + "/api/fleet/session"
+    request = urllib.request.Request(url, data=json.dumps(payload).encode())
+    request.add_header("Content-Type", "application/json")
+    request.add_header("X-De-Secret", read_secret())
+    urllib.request.urlopen(request, timeout=15).read()
+
+
+def remember(payload):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    out = open(QUEUE, "a")
+    out.write(json.dumps(payload) + "\n")
+    out.close()
+    os.chmod(QUEUE, 0o600)
+
+
+def flush():
+    if not os.path.exists(QUEUE):
+        return
+    lines = [line.strip() for line in open(QUEUE) if line.strip()]
+    left = []
+    for line in lines:
+        try:
+            post(json.loads(line))
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+            left.append(line)
+    if left:
+        out = open(QUEUE, "w")
+        out.write("\n".join(left) + "\n")
+        out.close()
+    else:
+        os.remove(QUEUE)
+
+
+def main():
+    if len(sys.argv) < 3:
+        sys.stderr.write("usage: de-report <start|end> <login>\n")
+        return 1
+
+    if not API:
+        return 0
+
+    payload = {
+        "event": sys.argv[1],
+        "login": sys.argv[2],
+        "hostname": socket.gethostname(),
+        "time": int(time.time()),
+    }
+
+    try:
+        flush()
+        post(payload)
+        log(payload["event"] + " " + payload["login"])
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as error:
+        remember(payload)
+        log("отложено: " + str(error))
+
+    return 0
+
+
+sys.exit(main())

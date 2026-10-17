@@ -38,7 +38,7 @@ chmod 0755 "$CONFIG_DIR"
 chmod 0700 "$STATE_DIR"
 
 say "ставлю скрипты в $BIN_DIR"
-for script in de-login-auth de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen de-agent de-palette; do
+for script in de-login-auth de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen de-agent de-palette de-report; do
     install -m 0750 -o root -g root "$HERE/bin/$script" "$BIN_DIR/$script"
 done
 install -m 0755 -o root -g root "$HERE/bin/de-session-start" /usr/local/bin/de-session-start
