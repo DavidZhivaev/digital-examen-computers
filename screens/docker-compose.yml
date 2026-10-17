@@ -37,7 +37,10 @@ services:
       - ./command.secret:/run/secrets/command.secret:ro
       - ./notify.secret:/run/secrets/notify.secret:ro
     environment:
-      DE_API_URL: "${DE_API_URL:-https://as.1580.ru}"
+      # Внутри школьного сервера к сайту ходим напрямую по docker-сети:
+      # публичный адрес отдаётся с самоподписанным сертификатом, и проверка
+      # TLS честно падает. Лишнего хопа через VPS тут тоже не нужно.
+      DE_API_URL: "${DE_SITE_INTERNAL_URL:-http://de-prod-api:8000}"
       DE_NOTIFY_URL: "http://de-alerts:8099/notify"
       DE_SCREEN_LIMIT_GB: "900"
       DE_SCREEN_MIN_FREE_GB: "50"
@@ -58,7 +61,7 @@ services:
       - ./proxy.secret:/run/secrets/proxy.secret:ro
       - ./command.secret:/run/secrets/command.secret:ro
     environment:
-      DE_API_URL: "${DE_API_URL:-https://as.1580.ru}"
+      DE_API_URL: "${DE_SITE_INTERNAL_URL:-http://de-prod-api:8000}"
       DE_OFFLINE_REFRESH_LIMIT: "${DE_OFFLINE_REFRESH_LIMIT:-100}"
     networks:
       - de-edge
