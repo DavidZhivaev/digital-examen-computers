@@ -253,15 +253,22 @@ def rewrite_head(head, token):
 
 
 def filter_ready():
-    """Можно ли вскрывать: включено, есть центр, есть openssl."""
+    """Можно ли вскрывать: включено, есть центр и есть список исключений."""
     if not FILTER_ON:
+        return False
+    if not NO_OPEN:
         return False
     return os.path.exists(CA_CERT) and os.path.exists(CA_KEY)
 
 
 def opening_allowed(host):
-    """Этот узел вскрываем или пропускаем, не заглядывая внутрь."""
-    if not host:
+    """Этот узел вскрываем или пропускаем, не заглядывая внутрь.
+
+    Пустой список «не вскрывать» означает, что файла нет или его не
+    прочитали. Вскрывать в этом случае НИЧЕГО нельзя: иначе пропажа одного
+    файла превращается в расшифровку банка и госуслуг.
+    """
+    if not host or not NO_OPEN:
         return False
     return not de_patterns.any_match(NO_OPEN, host)
 
