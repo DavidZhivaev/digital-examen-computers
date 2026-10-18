@@ -71,7 +71,7 @@ done
 chmod 0750 "$LIB_DIR"
 
 say "ставлю скрипты в $BIN_DIR"
-for script in de-deps de-encrypt de-rotate de-login-auth de-offline-auth de-vault de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen de-agent de-palette de-report de-policy de-keywatch de-traffic de-init de-update; do
+for script in de-deps de-selftest de-encrypt de-rotate de-login-auth de-offline-auth de-vault de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen de-agent de-palette de-report de-policy de-keywatch de-traffic de-init de-update; do
     install -m 0750 -o root -g root "$HERE/bin/$script" "$BIN_DIR/$script"
 done
 install -m 0755 -o root -g root "$HERE/bin/de-session-start" /usr/local/bin/de-session-start
@@ -267,6 +267,10 @@ systemctl start de-vault-sync.timer >/dev/null 2>&1 || true
 systemctl start de-rotate.timer >/dev/null 2>&1 || true
 
 say "защищённые пользователи: $PROTECTED"
+
+say "проверяю сам себя"
+/usr/bin/python3 "$BIN_DIR/de-selftest" || say "проверка нашла плохое, прочитайте строки выше"
+
 say "готово, перезагружаюсь"
 say "после перезагрузки на экране входа вводится логин и пароль с сайта"
 sleep 5

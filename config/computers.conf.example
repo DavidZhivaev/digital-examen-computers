@@ -75,6 +75,7 @@ DE_COMPUTER_ROOM=""
 DE_COMPUTER_NUMBER=""
 
 DE_KEY_FILE="de-key.txt"
+DE_KEY_PUBLIC_FILE="/etc/digital-examen/key-public.pem"
 DE_KEY_SUDO_GROUP="de-keyholders"
 DE_KEY_POLL="5"
 

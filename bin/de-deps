@@ -8,6 +8,11 @@ say() {
     echo "[deps] $1"
 }
 
+ONLY_CHECK=0
+if [ "$1" = "check" ]; then
+    ONLY_CHECK=1
+fi
+
 PM=""
 for candidate in apt-get dnf yum zypper pacman; do
     if command -v "$candidate" >/dev/null 2>&1; then
@@ -31,6 +36,10 @@ refresh_index() {
 install_package() {
     [ -z "$1" ] && return 1
     [ -z "$PM" ] && return 1
+    if [ "$ONLY_CHECK" = "1" ]; then
+        say "не хватает пакета $1 (режим проверки, ничего не ставлю)"
+        return 1
+    fi
     refresh_index
     say "ставлю пакет $1"
     case "$PM" in

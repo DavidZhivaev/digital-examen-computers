@@ -1,0 +1,260 @@
+#!/usr/bin/python3
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, "/usr/local/lib/digital-examen")
+
+import de_keys
+import de_vault
+
+CONFIG = de_vault.read_config()
+API = CONFIG.get("DE_API_URL", "")
+COMPUTER = CONFIG.get("DE_COMPUTER_ID", "")
+VAULT_DIR = CONFIG.get("DE_VAULT_DIR", "/var/lib/digital-examen/vault")
+BUNDLE_FILE = os.path.join(VAULT_DIR, "bundle.de")
+VAULT_SECRET_FILE = CONFIG.get("DE_VAULT_SECRET_FILE", "/etc/digital-examen/vault.secret")
+KEY_PUBLIC_FILE = CONFIG.get("DE_KEY_PUBLIC_FILE", "/etc/digital-examen/key-public.pem")
+KEY_FILE_NAME = CONFIG.get("DE_KEY_FILE", "de-key.txt")
+LOG = CONFIG.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
+
+GOOD = 0
+WARN = 1
+BAD = 2
+
+MARK = {GOOD: "  ок   ", WARN: " важно ", BAD: " плохо "}
+
+results = []
+
+
+def check(name, level, message):
+    results.append((name, level, message))
+    sys.stdout.write("[%s] %-28s %s\n" % (MARK[level], name, message))
+    sys.stdout.flush()
+
+
+def run(command, seconds=20):
+    try:
+        done = subprocess.run(command, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, timeout=seconds)
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, ""
+    return done.returncode, done.stdout.decode("utf-8", "replace")
+
+
+def check_python():
+    version = "%d.%d.%d" % sys.version_info[:3]
+    if sys.version_info[:2] < (3, 8):
+        check("питон", BAD, "версия %s, нужен 3.8 или новее" % version)
+    else:
+        check("питон", GOOD, "версия %s" % version)
+
+
+def check_deps():
+    code, output = run(["/usr/local/sbin/de-deps", "check"], seconds=120)
+    tail = [line for line in output.splitlines() if "НЕ НАЙДЕН" in line or "не будет" in line]
+    bcrypt_line = [line for line in output.splitlines() if "bcrypt" in line]
+    if code == 0:
+        check("зависимости", GOOD, "всё на месте")
+    else:
+        check("зависимости", BAD, "; ".join(tail) or "de-deps вернул ошибку")
+    for line in bcrypt_line:
+        if "системный crypt" in line:
+            check("bcrypt", GOOD, "через системный crypt")
+        elif "модуль bcrypt" in line:
+            check("bcrypt", WARN, "через модуль python3-bcrypt, проверьте, что он живой")
+        elif "считать нечем" in line:
+            check("bcrypt", BAD, "считать нечем, вход без интернета работать не будет")
+
+
+def check_enrolled():
+    if COMPUTER:
+        check("учёт", GOOD, "компьютер зарегистрирован как %s" % COMPUTER)
+    else:
+        check("учёт", BAD, "компьютер на учёт не поставлен, запустите de-init")
+
+
+def check_secrets():
+    missing = []
+    for name in ("DE_PROXY_SECRET_FILE", "DE_COMMAND_SECRET_FILE",
+                 "DE_SCREEN_SECRET_FILE", "DE_VAULT_SECRET_FILE"):
+        path = CONFIG.get(name, "")
+        if not path or not de_vault.read_text(path):
+            missing.append(name)
+    if missing:
+        check("секреты", BAD, "нет: %s" % ", ".join(missing))
+    else:
+        check("секреты", GOOD, "все четыре на месте")
+
+
+def check_key_public():
+    pem = de_keys.read_public_key(KEY_PUBLIC_FILE)
+    if not pem:
+        check("подпись ключа", WARN,
+              "нет %s, ключ проверяется только сайтом" % KEY_PUBLIC_FILE)
+        return
+    found = de_keys.find_key(KEY_FILE_NAME)
+    if not found:
+        check("подпись ключа", GOOD, "открытый ключ на месте, флешки сейчас нет")
+        return
+    body = de_keys.verify(de_keys.read_token(found), pem)
+    if body:
+        check("подпись ключа", GOOD,
+              "ключ на флешке настоящий, владелец %s" % body.get("login", ""))
+    else:
+        check("подпись ключа", BAD, "ключ на флешке подписью не подтверждается")
+
+
+def check_encryption():
+    code, output = run(["/usr/local/sbin/de-encrypt", "status"])
+    if code != 0:
+        check("шифрование", WARN, "de-encrypt status не отработал")
+        return
+    try:
+        state = json.loads(output)
+    except ValueError:
+        check("шифрование", WARN, "de-encrypt status ответил не json")
+        return
+    if not state.get("enabled"):
+        check("шифрование", WARN, "том не включён, секреты лежат открыто")
+        return
+    if state.get("tpm"):
+        check("шифрование", GOOD, "том открыт, ключ запечатан в TPM")
+    else:
+        check("шифрование", WARN,
+              "TPM нет, ключ тома лежит на том же диске: см. de-encrypt root-advice")
+
+
+def check_offline():
+    secret = de_vault.read_text(VAULT_SECRET_FILE)
+    if not secret:
+        check("вход без интернета", BAD, "нет секрета тома")
+        return
+    bundle = de_vault.load_bundle(BUNDLE_FILE, secret)
+    if not bundle:
+        check("вход без интернета", BAD, "выгрузки нет, запустите de-vault sync")
+        return
+    accounts = bundle.get("accounts") or []
+    fresh = de_vault.bundle_fresh(bundle, int(CONFIG.get("DE_VAULT_MAX_AGE_DAYS", "30")))
+    if not fresh:
+        check("вход без интернета", BAD, "выгрузка просрочена, нужен de-vault sync")
+        return
+    check("вход без интернета", GOOD, "учёток в выгрузке: %d" % len(accounts))
+    measure_offline(bundle, accounts)
+
+
+def measure_offline(bundle, accounts):
+    """Сколько стоит одна попытка входа без интернета на этой машине.
+
+    Считаем ту же цепочку с заведомо неверным паролем: ответ нас не
+    интересует, интересует время. Дольше трёх секунд — экран входа начнёт
+    казаться зависшим, и тогда scrypt_n уменьшают с 17 до 16 сразу в двух
+    местах: computers/offline.py на сайте и pylib/de_vault.py здесь.
+    """
+    if not accounts:
+        return
+    entry = accounts[0]
+    started = time.time()
+    try:
+        de_vault.password_matches(de_vault.read_text(VAULT_SECRET_FILE), entry, "заведомо-не-пароль")
+    except Exception as error:
+        check("попытка входа", BAD, "цепочка не считается: %s" % error)
+        return
+    spent = time.time() - started
+    if spent > 3:
+        check("попытка входа", WARN,
+              "%.2f с — долго, уменьшите scrypt_n с 17 до 16 на сайте и здесь" % spent)
+    else:
+        check("попытка входа", GOOD, "%.2f с" % spent)
+
+
+def check_screen():
+    code, _ = run(["/usr/bin/systemctl", "is-active", "de-screen.service"])
+    if code != 0:
+        check("запись экрана", BAD, "служба de-screen не работает")
+        return
+    text = ""
+    if os.path.exists(LOG):
+        try:
+            text = open(LOG, errors="replace").read()[-200000:]
+        except IOError:
+            text = ""
+    if "экран не снялся" in text:
+        last = [line for line in text.splitlines() if "экран не снялся" in line][-1]
+        check("запись экрана", WARN, "в журнале есть «экран не снялся»: %s" % last[:80])
+    else:
+        check("запись экрана", GOOD, "служба работает, жалоб в журнале нет")
+
+    queue = CONFIG.get("DE_SCREEN_QUEUE", "/var/lib/digital-examen/screen-queue")
+    if os.path.isdir(queue):
+        size = 0
+        for name in os.listdir(queue):
+            try:
+                size += os.path.getsize(os.path.join(queue, name))
+            except OSError:
+                pass
+        if size > 10 * 1024 * 1024:
+            check("очередь кадров", WARN,
+                  "%.1f МБ не отправлено — проверьте связь с приёмником" % (size / 1048576.0))
+        else:
+            check("очередь кадров", GOOD, "%.1f МБ" % (size / 1048576.0))
+
+
+def check_sandbox():
+    code, output = run(["/usr/sbin/ip", "netns", "list"])
+    if code != 0:
+        code, output = run(["/sbin/ip", "netns", "list"])
+    spaces = [line.split()[0] for line in output.splitlines() if line.strip().startswith("de-")]
+    if spaces:
+        check("песочница", GOOD, "сетевых пространств: %d" % len(spaces))
+    else:
+        check("песочница", GOOD, "сейчас никто не вошёл, пространств нет")
+
+
+def check_site():
+    if not API:
+        check("связь с сайтом", BAD, "в настройках нет DE_API_URL")
+        return
+    code, _ = run(["/usr/bin/curl", "-sS", "-o", "/dev/null", "-m", "15",
+                   API.rstrip("/") + "/api/health"])
+    if code == 0:
+        check("связь с сайтом", GOOD, API)
+    else:
+        check("связь с сайтом", WARN, "сайт сейчас не отвечает (%s)" % API)
+
+
+def main():
+    if os.geteuid() != 0:
+        sys.stdout.write("Запускать от root: sudo de-selftest\n")
+        return 1
+
+    sys.stdout.write("Проверка компьютера Digital Examen\n\n")
+
+    check_python()
+    check_deps()
+    check_enrolled()
+    check_secrets()
+    check_key_public()
+    check_encryption()
+    check_offline()
+    check_screen()
+    check_sandbox()
+    check_site()
+
+    bad = len([item for item in results if item[1] == BAD])
+    warn = len([item for item in results if item[1] == WARN])
+
+    sys.stdout.write("\n")
+    if bad:
+        sys.stdout.write("Плохо: %d. Машину в класс ставить рано.\n" % bad)
+    elif warn:
+        sys.stdout.write("Важного: %d. Работать будет, но прочитайте строки выше.\n" % warn)
+    else:
+        sys.stdout.write("Всё в порядке.\n")
+    return 1 if bad else 0
+
+
+sys.exit(main())

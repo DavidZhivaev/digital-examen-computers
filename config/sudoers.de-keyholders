@@ -1,21 +1,34 @@
-Cmnd_Alias DE_RECORDING = /usr/bin/systemctl stop de-*, \
-                          /usr/bin/systemctl disable de-*, \
-                          /usr/bin/systemctl mask de-*, \
-                          /usr/bin/systemctl kill de-*, \
-                          /bin/systemctl stop de-*, \
-                          /bin/systemctl disable de-*, \
-                          /bin/systemctl mask de-*, \
-                          /bin/systemctl kill de-*
+Cmnd_Alias DE_TOOLS = /usr/local/sbin/de-init, \
+                      /usr/local/sbin/de-vault sync, \
+                      /usr/local/sbin/de-vault show, \
+                      /usr/local/sbin/de-rotate, \
+                      /usr/local/sbin/de-encrypt status, \
+                      /usr/local/sbin/de-encrypt root-advice, \
+                      /usr/local/sbin/de-deps check, \
+                      /usr/local/sbin/de-selftest
 
-Cmnd_Alias DE_SECRETS = /usr/bin/cat /etc/digital-examen/*.secret, \
-                        /bin/cat /etc/digital-examen/*.secret, \
-                        /usr/bin/cat /var/lib/digital-examen/secure/secrets/*, \
-                        /bin/cat /var/lib/digital-examen/secure/secrets/*, \
-                        /usr/local/sbin/de-encrypt, \
-                        /usr/bin/cryptsetup *, /sbin/cryptsetup *, /usr/sbin/cryptsetup *
+Cmnd_Alias DE_SERVICES = /usr/bin/systemctl status *, /bin/systemctl status *, \
+                         /usr/bin/systemctl start de-*, /bin/systemctl start de-*, \
+                         /usr/bin/systemctl restart de-*, /bin/systemctl restart de-*, \
+                         /usr/bin/systemctl is-active *, /bin/systemctl is-active *, \
+                         /usr/bin/systemctl list-units *, /bin/systemctl list-units *, \
+                         /usr/bin/journalctl *, /bin/journalctl *
 
-Cmnd_Alias DE_GUARDS = /usr/bin/visudo *, /usr/sbin/visudo *, \
-                       /usr/bin/tee /etc/sudoers.d/*, /bin/tee /etc/sudoers.d/*, \
-                       /usr/bin/tee /etc/pam.d/*, /bin/tee /etc/pam.d/*
+Cmnd_Alias DE_HARDWARE = /usr/bin/nmcli *, /bin/nmcli *, \
+                         /usr/sbin/lpadmin *, /usr/bin/lpadmin *, \
+                         /usr/sbin/cupsctl *, /usr/bin/cupsctl *, \
+                         /usr/bin/system-config-printer, \
+                         /usr/sbin/lpinfo *, /usr/bin/lpinfo *
 
-%de-keyholders ALL=(ALL) ALL, !DE_RECORDING, !DE_SECRETS, !DE_GUARDS
+Cmnd_Alias DE_LOOK = /usr/bin/dmesg, /bin/dmesg, \
+                     /usr/sbin/ip addr, /sbin/ip addr, /usr/sbin/ip route, /sbin/ip route, \
+                     /usr/bin/ss -tulpn, /usr/sbin/ss -tulpn, \
+                     /usr/bin/lsblk, /bin/lsblk, \
+                     /usr/bin/df -h, /bin/df -h
+
+Cmnd_Alias DE_POWER = /usr/bin/systemctl reboot, /bin/systemctl reboot, \
+                      /usr/bin/systemctl poweroff, /bin/systemctl poweroff, \
+                      /usr/sbin/reboot, /sbin/reboot, \
+                      /usr/sbin/poweroff, /sbin/poweroff
+
+%de-keyholders ALL=(ALL) NOPASSWD: DE_TOOLS, DE_SERVICES, DE_HARDWARE, DE_LOOK, DE_POWER

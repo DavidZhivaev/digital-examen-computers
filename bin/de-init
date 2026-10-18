@@ -43,6 +43,8 @@ COMMAND_SECRET_FILE = CONFIG.get("DE_COMMAND_SECRET_FILE", "/etc/digital-examen/
 SCREEN_SECRET_FILE = CONFIG.get("DE_SCREEN_SECRET_FILE", "/etc/digital-examen/screen.secret")
 VAULT_SECRET_FILE = CONFIG.get("DE_VAULT_SECRET_FILE", "/etc/digital-examen/vault.secret")
 KEY_FILE_NAME = CONFIG.get("DE_KEY_FILE", "de-key.txt")
+KEY_PUBLIC_FILE = CONFIG.get("DE_KEY_PUBLIC_FILE", "/etc/digital-examen/key-public.pem")
+de_keys.PUBLIC_KEY_FILE = KEY_PUBLIC_FILE
 
 
 def say(message):
@@ -63,24 +65,56 @@ def call(path, payload=None, params=None):
     return json.loads(answer.read().decode("utf-8"))
 
 
+def fetch_public_key():
+    """Открытая часть подписи ключа: по ней проверяем файл на месте.
+
+    Берём её один раз при установке и кладём рядом с настройками. Дальше
+    компьютер отличает настоящий ключ от выдуманного сам, в том числе без
+    интернета.
+    """
+    if os.path.exists(KEY_PUBLIC_FILE):
+        return True
+    try:
+        answer = call("/api/computers/key/public")
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+        return False
+    pem = answer.get("public_key", "")
+    if not pem:
+        return False
+    folder = os.path.dirname(KEY_PUBLIC_FILE)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    out = open(KEY_PUBLIC_FILE, "w")
+    out.write(pem)
+    out.close()
+    os.chmod(KEY_PUBLIC_FILE, 0o644)
+    return True
+
+
 def wait_for_key():
     """Без ключа администратора компьютер на учёт не ставится.
 
     Ключ лежит файлом в корне флешки, выдаёт его сайт администратору
-    информатики или школы. Права владельца сайт проверяет заново на каждой
+    информатики или школы. Внутри файла — подписанный сайтом токен, в
+    котором зашит владелец. Права владельца сайт проверяет заново на каждой
     установке, поэтому отобранные права закрывают и установку.
     """
     say("Вставьте флешку с ключом администратора (файл %s)." % KEY_FILE_NAME)
+    say("Имя со скобками, %s, тоже подойдёт." % "de-key (1).txt")
     say("Ключ скачивается на сайте: Компьютеры → Скачать ключ.")
     say("Отмена — Ctrl+C.")
     while True:
         path = de_keys.find_key(KEY_FILE_NAME)
         if path:
             values = de_keys.parse_key(path)
-            if values.get("fingerprint") and values.get("secret"):
+            if not values.get("token"):
+                say("Файл ключа найден, но токена в нём нет: %s" % path)
+            elif not values.get("verified"):
+                say("Подпись ключа не сходится, скачайте ключ заново: %s" % path)
+            else:
                 say("Ключ найден: %s" % path)
+                say("Владелец ключа: %s" % values.get("login", ""))
                 return values
-            say("Файл ключа найден, но в нём нет fingerprint и secret.")
         try:
             time.sleep(3)
         except KeyboardInterrupt:
@@ -142,6 +176,8 @@ def main():
     if not os.path.exists(CONFIG_FILE):
         say("Нет %s — сначала отработает setup.sh." % CONFIG_FILE)
         return 1
+
+    fetch_public_key()
 
     key = wait_for_key()
     if not key:
@@ -209,8 +245,7 @@ def main():
             "room": room,
             "number": number,
             "hostname": socket.gethostname(),
-            "fingerprint": key.get("fingerprint", ""),
-            "secret": key.get("secret", ""),
+            "token": key.get("token", ""),
             "computer": name,
         })
     except urllib.error.HTTPError as error:

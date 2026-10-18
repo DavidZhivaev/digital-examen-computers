@@ -40,6 +40,7 @@ CONFIG = read_config()
 API = CONFIG.get("DE_API_URL", "")
 SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
 KEY_FILE = CONFIG.get("DE_KEY_FILE", "de-key.txt")
+de_keys.PUBLIC_KEY_FILE = CONFIG.get("DE_KEY_PUBLIC_FILE", "/etc/digital-examen/key-public.pem")
 SUDO_GROUP = CONFIG.get("DE_KEY_SUDO_GROUP", "de-keyholders")
 POLL = int(CONFIG.get("DE_KEY_POLL", "5"))
 LOG = CONFIG.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
@@ -86,8 +87,7 @@ def check_key(values):
     if not API:
         return {}
     body = json.dumps({
-        "fingerprint": values.get("fingerprint", ""),
-        "secret": values.get("secret", ""),
+        "token": values.get("token", ""),
         "computer": CONFIG.get("DE_COMPUTER_ID", ""),
     }).encode()
     request = urllib.request.Request(
@@ -162,7 +162,11 @@ def main():
             continue
 
         values = parse_key(path)
-        if not values.get("fingerprint") or not values.get("secret"):
+        if not values.get("verified"):
+            continue
+
+        owner_in_key = str(values.get("login", "")).lower()
+        if owner_in_key != login.lower():
             continue
 
         answer = check_key(values)
