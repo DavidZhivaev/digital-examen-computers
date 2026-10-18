@@ -13,6 +13,10 @@ import urllib.error
 import urllib.request
 import zlib
 
+sys.path.insert(0, "/usr/local/lib/digital-examen")
+
+import de_time
+
 CONFIG_FILE = "/etc/digital-examen/computers.conf"
 LOGIN_FILE = "/run/digital-examen/current-login"
 
@@ -53,6 +57,11 @@ KEY_SHARE = int(CONFIG.get("DE_SCREEN_KEYFRAME_SHARE", "40"))
 STORE_INTERVAL = float(CONFIG.get("DE_SCREEN_INTERVAL", "2"))
 WATCH_INTERVAL = float(CONFIG.get("DE_SCREEN_WATCH_INTERVAL", "2"))
 LIVE_INTERVAL = float(CONFIG.get("DE_SCREEN_LIVE_INTERVAL", "1"))
+
+# Писать ли архив на переменах. Выключение экономит около пятой части
+# диска, но тогда переменa остаётся незаписанной — решение школы, а не
+# наше, поэтому по умолчанию пишем всегда.
+SKIP_BREAKS = CONFIG.get("DE_SCREEN_LESSONS_ONLY", "0") == "1"
 
 WORK_DIR = CONFIG.get("DE_SCREEN_WORK_DIR", "/run/digital-examen/screen")
 SECRET_FILE = CONFIG.get("DE_SCREEN_SECRET_FILE", CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret"))
@@ -526,6 +535,11 @@ def main():
             store.reset()
             live.reset()
             last_login = login
+
+        if SKIP_BREAKS and not watched and not de_time.lesson_now()[0]:
+            store.reset()
+            time.sleep(STORE_INTERVAL)
+            continue
 
         try:
             raw = grab(login, hint)

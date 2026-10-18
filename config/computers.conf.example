@@ -68,6 +68,7 @@ DE_SCREEN_CA="/etc/digital-examen/school-ca.pem"
 DE_COMMAND_SECRET_FILE="/etc/digital-examen/command.secret"
 DE_SCREEN_LIVE_INTERVAL="1"
 DE_SCREEN_WATCH_INTERVAL="2"
+DE_SCREEN_LESSONS_ONLY="0"
 
 DE_COMPUTER_ID=""
 DE_COMPUTER_CORPUS=""

@@ -9,6 +9,7 @@ import urllib.request
 sys.path.insert(0, "/usr/local/lib/digital-examen")
 
 import de_patterns
+import de_time
 
 POLICY_FILE = "/run/digital-examen/policy.json"
 STATE_DIR = "/var/lib/digital-examen/users"
@@ -125,8 +126,12 @@ def decide(host, login, policy=None, url="", title="", text=""):
         policy = read_policy()
 
     groups = sorted(policy.get("groups", []), key=lambda item: -int(item.get("priority", 50)))
+    during_lesson = de_time.lesson_now(policy.get("bells"))[0]
 
     for group in groups:
+        if group.get("lessons_only") and not during_lesson:
+            continue
+
         if list_hits(group.get("always_allow"), host):
             return "pass", group.get("name", ""), False
 

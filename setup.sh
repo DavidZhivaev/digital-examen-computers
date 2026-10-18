@@ -65,7 +65,7 @@ chmod 0700 "$STATE_DIR"
 
 say "ставлю общие модули в $LIB_DIR"
 mkdir -p "$LIB_DIR"
-for module in de_vault.py de_users.py de_keys.py de_patterns.py de_certs.py de_filter.py; do
+for module in de_vault.py de_users.py de_keys.py de_patterns.py de_certs.py de_filter.py de_time.py; do
     install -m 0640 -o root -g root "$HERE/pylib/$module" "$LIB_DIR/$module"
 done
 chmod 0750 "$LIB_DIR"
