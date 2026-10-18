@@ -11,6 +11,11 @@ import sys
 import threading
 import time
 
+sys.path.insert(0, "/usr/local/lib/digital-examen")
+
+import de_filter
+import de_patterns
+
 CONFIG_FILE = "/etc/digital-examen/computers.conf"
 LOGIN_FILE = "/run/digital-examen/current-login"
 
@@ -45,6 +50,13 @@ TRAFFIC_SOCKET = CONFIG.get("DE_TRAFFIC_SOCKET", "/run/digital-examen/traffic.so
 POLICY_FILE = CONFIG.get("DE_POLICY_FILE", "/run/digital-examen/policy.json")
 POLICY_MODULE = CONFIG.get("DE_POLICY_MODULE", "/usr/local/sbin/de-policy")
 SEEN_SECONDS = int(CONFIG.get("DE_TRAFFIC_SEEN_SECONDS", "300"))
+
+FILTER_ON = CONFIG.get("DE_FILTER", "0") == "1"
+CA_DIR = CONFIG.get("DE_CA_DIR", "/var/lib/digital-examen/ca")
+CA_CERT = os.path.join(CA_DIR, "ca.crt")
+CA_KEY = os.path.join(CA_DIR, "ca.key")
+NO_OPEN_FILE = CONFIG.get("DE_NO_OPEN_FILE", "/etc/digital-examen/no-open.txt")
+NO_OPEN = de_patterns.read_list(NO_OPEN_FILE)
 
 SEEN = {}
 SEEN_LOCK = threading.Lock()
@@ -208,6 +220,37 @@ def rewrite_head(head, token):
     return b"\r\n".join(kept)
 
 
+def filter_ready():
+    """Можно ли вскрывать: включено, есть центр, есть openssl."""
+    if not FILTER_ON:
+        return False
+    return os.path.exists(CA_CERT) and os.path.exists(CA_KEY)
+
+
+def opening_allowed(host):
+    """Этот узел вскрываем или пропускаем, не заглядывая внутрь."""
+    if not host:
+        return False
+    return not de_patterns.any_match(NO_OPEN, host)
+
+
+def look_at(login):
+    """Проверка страницы для фильтра: адрес, заголовок и текст."""
+    def decide(url, title, text):
+        if POLICY is None:
+            return "pass"
+        host = url.split("://", 1)[-1].split("/", 1)[0]
+        verdict = POLICY.decide(host, login, POLICY.read_policy(POLICY_FILE),
+                                url=url, title=title, text=text)
+        if verdict[0] == "block":
+            if verdict[2]:
+                note_block(host, login, verdict[1])
+                warn_user(host, verdict[1])
+            return "block"
+        return "pass"
+    return decide
+
+
 def pipe(source, target):
     try:
         while True:
@@ -221,6 +264,48 @@ def pipe(source, target):
         target.shutdown(socket.SHUT_WR)
     except OSError:
         pass
+
+
+def is_connect(head):
+    return head[:8].upper().startswith(b"CONNECT")
+
+
+def open_inside(client, upstream, host, login):
+    """Дождаться ответа школьного прокси и встать в середину соединения.
+
+    Ответ «200 Connection established» от школьного прокси надо снять с
+    сокета до того, как начнётся TLS: иначе он попадёт в рукопожатие.
+    Ответ, отличный от 200, передаём браузеру как есть.
+    """
+    answer = b""
+    try:
+        while b"\r\n\r\n" not in answer:
+            chunk = upstream.recv(4096)
+            if not chunk:
+                return False
+            answer += chunk
+            if len(answer) > 8192:
+                return False
+    except OSError:
+        return False
+
+    if b" 200 " not in answer.split(b"\r\n", 1)[0]:
+        try:
+            client.sendall(answer)
+        except OSError:
+            pass
+        return True
+
+    try:
+        client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+    except OSError:
+        return True
+
+    try:
+        return de_filter.open_and_watch(client, host, 443, upstream,
+                                        CA_CERT, CA_KEY, look_at(login))
+    except Exception:
+        return True
 
 
 class Handler(socketserver.BaseRequestHandler):
@@ -276,6 +361,11 @@ class Handler(socketserver.BaseRequestHandler):
         except OSError:
             upstream.close()
             return
+
+        if is_connect(head[:split]) and filter_ready() and opening_allowed(host):
+            if open_inside(client, upstream, host, login):
+                upstream.close()
+                return
 
         first = threading.Thread(target=pipe, args=(client, upstream))
         first.daemon = True

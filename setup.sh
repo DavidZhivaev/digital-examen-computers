@@ -65,13 +65,13 @@ chmod 0700 "$STATE_DIR"
 
 say "ставлю общие модули в $LIB_DIR"
 mkdir -p "$LIB_DIR"
-for module in de_vault.py de_users.py de_keys.py; do
+for module in de_vault.py de_users.py de_keys.py de_patterns.py de_certs.py de_filter.py; do
     install -m 0640 -o root -g root "$HERE/pylib/$module" "$LIB_DIR/$module"
 done
 chmod 0750 "$LIB_DIR"
 
 say "ставлю скрипты в $BIN_DIR"
-for script in de-deps de-selftest de-encrypt de-rotate de-login-auth de-offline-auth de-vault de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen de-agent de-palette de-report de-policy de-keywatch de-traffic de-init de-update; do
+for script in de-deps de-selftest de-ca de-encrypt de-rotate de-login-auth de-offline-auth de-vault de-session de-cleanup de-netns-user de-proxy-relay de-enter-net de-box de-screen de-agent de-palette de-report de-policy de-keywatch de-traffic de-init de-update; do
     install -m 0750 -o root -g root "$HERE/bin/$script" "$BIN_DIR/$script"
 done
 install -m 0755 -o root -g root "$HERE/bin/de-session-start" /usr/local/bin/de-session-start
@@ -87,6 +87,9 @@ if [ ! -f "$CONFIG_FILE" ]; then
 else
     say "конфиг уже есть, не перезаписываю"
 fi
+
+say "ставлю список «не вскрывать»"
+install -m 0644 -o root -g root "$HERE/proxy/policy/no-open.txt" /etc/digital-examen/no-open.txt
 
 . "$CONFIG_FILE"
 GROUP="${DE_USER_GROUP:-de-students}"
@@ -267,6 +270,11 @@ systemctl start de-vault-sync.timer >/dev/null 2>&1 || true
 systemctl start de-rotate.timer >/dev/null 2>&1 || true
 
 say "защищённые пользователи: $PROTECTED"
+
+if [ "${DE_FILTER:-0}" = "1" ]; then
+    say "создаю свой удостоверяющий центр для фильтра"
+    /usr/bin/python3 "$BIN_DIR/de-ca" make || say "центр не создан, фильтр работать не будет"
+fi
 
 say "проверяю сам себя"
 /usr/bin/python3 "$BIN_DIR/de-selftest" || say "проверка нашла плохое, прочитайте строки выше"

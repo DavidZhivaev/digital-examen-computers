@@ -1,0 +1,177 @@
+#!/usr/bin/python3
+
+import os
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, "/usr/local/lib/digital-examen")
+
+import de_vault
+
+CONFIG = de_vault.read_config()
+CA_DIR = CONFIG.get("DE_CA_DIR", "/var/lib/digital-examen/ca")
+CA_KEY = os.path.join(CA_DIR, "ca.key")
+CA_CERT = os.path.join(CA_DIR, "ca.crt")
+COMPUTER = CONFIG.get("DE_COMPUTER_ID", "компьютер")
+YEARS = int(CONFIG.get("DE_CA_YEARS", "5"))
+
+TRUST_DIRS = (
+    "/etc/pki/trust/anchors",
+    "/usr/local/share/ca-certificates",
+    "/etc/pki/ca-trust/source/anchors",
+)
+
+
+def say(message):
+    sys.stdout.write(message + "\n")
+    sys.stdout.flush()
+
+
+def run(command):
+    try:
+        done = subprocess.run(command, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, ""
+    return done.returncode, done.stdout.decode("utf-8", "replace")
+
+
+def make():
+    """Свой удостоверяющий центр этого компьютера.
+
+    Ключ создаётся здесь и отсюда никуда не уходит: он лежит под root в
+    зашифрованном томе, у ученика к нему доступа нет. У каждой машины свой
+    центр, поэтому вынос ключа с одной машины не даёт ничего на остальных.
+    """
+    os.makedirs(CA_DIR, exist_ok=True)
+    os.chmod(CA_DIR, 0o700)
+
+    if os.path.exists(CA_KEY) and os.path.exists(CA_CERT):
+        say("удостоверяющий центр уже есть")
+        return 0
+
+    # Расширения задаём файлом, а не ключами -addext: у openssl 1.1.1
+    # -addext basicConstraints добавляется ВТОРЫМ, рядом со своим
+    # умолчанием, и сертификат с двумя одинаковыми расширениями не
+    # принимается как издатель.
+    conf_path = os.path.join(CA_DIR, "ca.conf")
+    conf = open(conf_path, "w")
+    conf.write(
+        "[req]\n"
+        "distinguished_name = name\n"
+        "x509_extensions = ext\n"
+        "prompt = no\n"
+        "[name]\n"
+        "C = RU\n"
+        "O = Digital Examen\n"
+        "CN = Digital Examen %s\n"
+        "[ext]\n"
+        "basicConstraints = critical,CA:TRUE,pathlen:0\n"
+        "keyUsage = critical,keyCertSign,cRLSign\n"
+        "subjectKeyIdentifier = hash\n" % COMPUTER
+    )
+    conf.close()
+
+    code, output = run([
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", CA_KEY, "-out", CA_CERT,
+        "-days", str(YEARS * 365), "-config", conf_path,
+    ])
+    if code != 0:
+        say("не получилось создать центр: " + output.strip()[:300])
+        return 1
+
+    os.chmod(CA_KEY, 0o600)
+    os.chmod(CA_CERT, 0o644)
+    say("удостоверяющий центр создан: " + CA_CERT)
+    return 0
+
+
+def trust():
+    """Положить наш сертификат в доверенные хранилища системы."""
+    if not os.path.exists(CA_CERT):
+        say("сначала de-ca make")
+        return 1
+
+    body = open(CA_CERT, "rb").read()
+    put = 0
+    for folder in TRUST_DIRS:
+        if not os.path.isdir(folder):
+            continue
+        target = os.path.join(folder, "digital-examen.crt")
+        out = open(target, "wb")
+        out.write(body)
+        out.close()
+        os.chmod(target, 0o644)
+        put += 1
+
+    for command in (["update-ca-certificates"], ["update-ca-trust", "extract"]):
+        code, _ = run(command)
+        if code == 0:
+            break
+
+    say("сертификат положен в %d хранилищ системы" % put)
+    return 0 if put else 1
+
+
+def firefox(home):
+    """Firefox держит свои корни отдельно от системных.
+
+    Самый простой путь, который не требует лазить в базу NSS, —
+    корпоративная политика: Firefox читает `policies.json` и доверяет
+    перечисленному там сертификату.
+    """
+    folder = os.path.join(home, ".mozilla")
+    os.makedirs(folder, exist_ok=True)
+    text = (
+        '{\n'
+        '  "policies": {\n'
+        '    "Certificates": {\n'
+        '      "ImportEnterpriseRoots": true,\n'
+        '      "Install": ["%s"]\n'
+        '    }\n'
+        '  }\n'
+        '}\n' % CA_CERT
+    )
+    for place in ("/usr/lib64/firefox/distribution", "/usr/lib/firefox/distribution",
+                  "/etc/firefox/policies"):
+        if not os.path.isdir(os.path.dirname(place)):
+            continue
+        os.makedirs(place, exist_ok=True)
+        out = open(os.path.join(place, "policies.json"), "w")
+        out.write(text)
+        out.close()
+    return 0
+
+
+def main():
+    if os.geteuid() != 0:
+        say("Запускать от root.")
+        return 1
+
+    action = sys.argv[1] if len(sys.argv) > 1 else "status"
+
+    if action == "make":
+        code = make()
+        if code == 0:
+            trust()
+            firefox("/root")
+        return code
+
+    if action == "trust":
+        return trust()
+
+    if action == "status":
+        if os.path.exists(CA_CERT):
+            code, output = run(["openssl", "x509", "-in", CA_CERT, "-noout", "-subject", "-enddate"])
+            say(output.strip())
+            return 0
+        say("удостоверяющего центра ещё нет")
+        return 1
+
+    say("de-ca make | trust | status")
+    return 1
+
+
+sys.exit(main())

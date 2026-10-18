@@ -1,0 +1,77 @@
+# Узлы, которые фильтр пропускает НЕ ВСКРЫВАЯ.
+#
+# Либо потому, что вскрывать их нельзя по-человечески (банк, госуслуги,
+# медицина, личные деньги), либо потому, что программа проверяет сертификат
+# сама и с нашим просто перестанет работать.
+#
+# Такой узел проходит обычным туннелем: мы видим только имя узла, как и
+# раньше. Имя узла по-прежнему проверяется ограничениями — не вскрываем,
+# но и не отменяем запреты.
+#
+# Формат тот же, что у остальных списков: ya.ru, *.ya.ru, адрес, адрес/маска.
+
+# Деньги и государство
+*.gosuslugi.ru
+*.nalog.ru
+*.nalog.gov.ru
+*.sberbank.ru
+*.sber.ru
+*.vtb.ru
+*.tinkoff.ru
+*.tbank.ru
+*.alfabank.ru
+*.gazprombank.ru
+*.raiffeisen.ru
+*.open.ru
+*.psbank.ru
+*.rshb.ru
+*.mkb.ru
+*.sovcombank.ru
+*.qiwi.com
+*.yoomoney.ru
+*.mir.ru
+*.nspk.ru
+*.cbr.ru
+*.pfr.gov.ru
+*.sfr.gov.ru
+
+# Медицина и личные данные
+*.emias.info
+*.emias.mos.ru
+*.mos.ru
+
+# Своё: сертификат тут наш собственный, вскрывать себя незачем
+*.1580.ru
+
+# Программы, которые проверяют сертификат сами и сломаются
+*.mozilla.org
+*.mozilla.net
+*.mozilla.com
+*.googleapis.com
+*.gvt1.com
+*.gvt2.com
+*.windowsupdate.com
+*.microsoft.com
+*.office.com
+*.live.com
+*.apple.com
+*.icloud.com
+*.dropbox.com
+*.spotify.com
+*.whatsapp.com
+*.whatsapp.net
+*.telegram.org
+*.t.me
+*.signal.org
+*.opensuse.org
+*.suse.com
+*.debian.org
+*.ubuntu.com
+*.archlinux.org
+*.pypi.org
+*.pythonhosted.org
+*.npmjs.org
+*.docker.io
+*.docker.com
+*.github.com
+*.githubusercontent.com

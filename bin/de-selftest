@@ -9,6 +9,7 @@ import time
 sys.path.insert(0, "/usr/local/lib/digital-examen")
 
 import de_keys
+import de_patterns
 import de_vault
 
 CONFIG = de_vault.read_config()
@@ -171,6 +172,25 @@ def measure_offline(bundle, accounts):
         check("попытка входа", GOOD, "%.2f с" % spent)
 
 
+def check_filter():
+    if CONFIG.get("DE_FILTER", "0") != "1":
+        check("фильтр", GOOD, "выключен, трафик идёт туннелем как раньше")
+        return
+    ca_dir = CONFIG.get("DE_CA_DIR", "/var/lib/digital-examen/ca")
+    cert = os.path.join(ca_dir, "ca.crt")
+    key = os.path.join(ca_dir, "ca.key")
+    if not os.path.exists(cert) or not os.path.exists(key):
+        check("фильтр", BAD, "включён, но центра нет: запустите de-ca make")
+        return
+    code, _ = run(["openssl", "verify", "-CAfile", cert, cert])
+    if code != 0:
+        check("фильтр", WARN, "центр есть, но openssl им недоволен")
+        return
+    no_open = CONFIG.get("DE_NO_OPEN_FILE", "/etc/digital-examen/no-open.txt")
+    count = len(de_patterns.read_list(no_open))
+    check("фильтр", GOOD, "центр на месте, не вскрываем %d шаблонов" % count)
+
+
 def check_screen():
     code, _ = run(["/usr/bin/systemctl", "is-active", "de-screen.service"])
     if code != 0:
@@ -240,6 +260,7 @@ def main():
     check_key_public()
     check_encryption()
     check_offline()
+    check_filter()
     check_screen()
     check_sandbox()
     check_site()
