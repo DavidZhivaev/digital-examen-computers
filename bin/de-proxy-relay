@@ -15,6 +15,7 @@ sys.path.insert(0, "/usr/local/lib/digital-examen")
 
 import de_filter
 import de_patterns
+import de_watch
 
 CONFIG_FILE = "/etc/digital-examen/computers.conf"
 LOGIN_FILE = "/run/digital-examen/current-login"
@@ -57,6 +58,8 @@ CA_CERT = os.path.join(CA_DIR, "ca.crt")
 CA_KEY = os.path.join(CA_DIR, "ca.key")
 NO_OPEN_FILE = CONFIG.get("DE_NO_OPEN_FILE", "/etc/digital-examen/no-open.txt")
 NO_OPEN = de_patterns.read_list(NO_OPEN_FILE)
+
+WATCH_ON = CONFIG.get("DE_WATCH", "1") == "1"
 
 SEEN = {}
 SEEN_LOCK = threading.Lock()
@@ -115,6 +118,35 @@ def host_from_head(head):
     if target.startswith("["):
         return target[1:].split("]", 1)[0]
     return target.rsplit(":", 1)[0] if target.count(":") == 1 else target
+
+
+def note_alarm(host, login, found):
+    """Сообщить на сайт о подозрительном поведении соединения.
+
+    Это наблюдение, а не запрет: соединение продолжает работать, а на
+    сайте появляется запись с признаками, по которым мы сработали.
+    """
+    record = {
+        "kind": "alarm",
+        "value": host + " — " + "; ".join(found),
+        "at": int(time.time()),
+        "login": login,
+    }
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        client.sendto(json.dumps(record).encode(), TRAFFIC_SOCKET)
+        client.close()
+    except OSError:
+        pass
+
+
+def watch(host, login, **counts):
+    if not WATCH_ON or not host:
+        return
+    row = de_watch.note(host, login, **counts)
+    told, found = de_watch.check(row)
+    if told:
+        note_alarm(told, login, found)
 
 
 def note_block(host, login, group):
@@ -251,19 +283,40 @@ def look_at(login):
     return decide
 
 
-def pipe(source, target):
+def pipe(source, target, counter=None, side=""):
+    """Перелить байты и, если просят, посчитать их.
+
+    Счёт нужен присмотру за туннелями: он смотрит, сколько прошло в каждую
+    сторону и сколько соединение прожило.
+    """
+    moved = 0
     try:
         while True:
             chunk = source.recv(65536)
             if not chunk:
                 break
             target.sendall(chunk)
+            moved += len(chunk)
     except OSError:
         pass
+    if counter is not None:
+        counter[side] = counter.get(side, 0) + moved
     try:
         target.shutdown(socket.SHUT_WR)
     except OSError:
         pass
+
+
+def port_from_head(head):
+    try:
+        line = head.split(b"\r\n", 1)[0].decode("latin-1")
+    except (IndexError, UnicodeDecodeError):
+        return 443
+    parts = line.split()
+    if len(parts) < 2 or parts[0].upper() != "CONNECT":
+        return 443
+    tail = parts[1].rsplit(":", 1)
+    return int(tail[1]) if len(tail) == 2 and tail[1].isdigit() else 443
 
 
 def is_connect(head):
@@ -301,11 +354,23 @@ def open_inside(client, upstream, host, login):
     except OSError:
         return True
 
+    tally = {}
+
+    def count(what, how_many):
+        tally[what] = tally.get(what, 0) + how_many
+
+    started = time.time()
     try:
         return de_filter.open_and_watch(client, host, 443, upstream,
-                                        CA_CERT, CA_KEY, look_at(login))
+                                        CA_CERT, CA_KEY, look_at(login), count)
     except Exception:
         return True
+    finally:
+        watch(host, login,
+              pages=tally.get("page", 0),
+              requests=tally.get("request", 0),
+              streams=tally.get("stream", 0),
+              seconds=time.time() - started)
 
 
 class Handler(socketserver.BaseRequestHandler):
@@ -367,12 +432,21 @@ class Handler(socketserver.BaseRequestHandler):
                 upstream.close()
                 return
 
-        first = threading.Thread(target=pipe, args=(client, upstream))
+        counter = {}
+        started = time.time()
+
+        first = threading.Thread(target=pipe, args=(client, upstream, counter, "up"))
         first.daemon = True
         first.start()
-        pipe(upstream, client)
+        pipe(upstream, client, counter, "down")
         first.join(timeout=5)
         upstream.close()
+
+        watch(host, login,
+              port=port_from_head(head[:split]),
+              up=counter.get("up", 0),
+              down=counter.get("down", 0),
+              seconds=time.time() - started)
 
 
 class Server(socketserver.ThreadingTCPServer):

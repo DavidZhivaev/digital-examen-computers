@@ -179,7 +179,13 @@ def both_ways(first, second):
     thread.join(timeout=5)
 
 
-def open_and_watch(client, host, port, upstream, ca_cert, ca_key, look):
+def is_stream(head):
+    """Течёт ли ответ: так отвечают чаты с моделью."""
+    kind = header_value(head, "content-type").lower()
+    return kind.startswith("text/event-stream")
+
+
+def open_and_watch(client, host, port, upstream, ca_cert, ca_key, look, count=None):
     """Встать в середину одного соединения.
 
     `look` — то, что решает, пускать ли страницу: получает адрес, заголовок
@@ -204,11 +210,11 @@ def open_and_watch(client, host, port, upstream, ca_cert, ca_key, look):
             pass
         return True
 
-    serve(inner_client, inner_upstream, host, port, look)
+    serve(inner_client, inner_upstream, host, port, look, count)
     return True
 
 
-def serve(client, upstream, host, port, look):
+def serve(client, upstream, host, port, look, count=None):
     """Запрос за запросом, пока соединение живо.
 
     Соединение закрываем, как только о том просит любая из сторон. Без
@@ -252,6 +258,11 @@ def serve(client, upstream, host, port, look):
         if not answer_head:
             return
 
+        if count is not None:
+            count("request", 1)
+            if is_stream(answer_head):
+                count("stream", 1)
+
         if not is_page(answer_head):
             try:
                 client.sendall(answer_head + b"\r\n\r\n" + answer_rest)
@@ -259,6 +270,9 @@ def serve(client, upstream, host, port, look):
                 return
             both_ways(client, upstream)
             return
+
+        if count is not None:
+            count("page", 1)
 
         answer_closes = header_value(answer_head, "connection").lower() == "close"
 
