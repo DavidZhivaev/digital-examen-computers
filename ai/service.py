@@ -19,6 +19,16 @@ DOUBT_FILE = os.environ.get("DE_AI_DOUBT_FILE", "/models/doubt.jsonl")
 DOUBT_LOW = float(os.environ.get("DE_AI_DOUBT_LOW", "0.35"))
 DOUBT_HIGH = float(os.environ.get("DE_AI_DOUBT_HIGH", "0.75"))
 
+# Пока модели нет, копим настоящие страницы: по одной с узла в час и не
+# больше заданного числа за сутки. Из них и соберётся первая настоящая
+# выборка вместо придуманной.
+COLLECT = os.environ.get("DE_AI_COLLECT", "1") == "1"
+COLLECT_PER_DAY = int(os.environ.get("DE_AI_COLLECT_PER_DAY", "500"))
+COLLECT_HOST_SECONDS = int(os.environ.get("DE_AI_COLLECT_HOST_SECONDS", "3600"))
+
+SEEN_HOSTS = {}
+COLLECTED = [0, 0.0]
+
 LOCK = threading.Lock()
 CACHE = {}
 MACHINE = [None, {}]
@@ -82,6 +92,48 @@ def note_doubt(sample, chance):
         pass
 
 
+def collect(sample):
+    """Отложить настоящую страницу на будущую разметку.
+
+    Пишем только то, что и так уходит классификатору: узел, адрес,
+    заголовок и обрезанный текст. Ни логина, ни компьютера здесь нет —
+    выборка должна учить отличать страницы, а не людей.
+    """
+    if not COLLECT or not sample.get("text"):
+        return
+
+    host = str(sample.get("host", ""))
+    now = time.time()
+
+    with LOCK:
+        day = int(now // 86400)
+        if COLLECTED[1] != day:
+            COLLECTED[0] = 0
+            COLLECTED[1] = day
+        if COLLECTED[0] >= COLLECT_PER_DAY:
+            return
+        if now - SEEN_HOSTS.get(host, 0) < COLLECT_HOST_SECONDS:
+            return
+        SEEN_HOSTS[host] = now
+        COLLECTED[0] += 1
+        if len(SEEN_HOSTS) > 20000:
+            SEEN_HOSTS.clear()
+
+    try:
+        out = open(DOUBT_FILE, "a")
+        out.write(json.dumps({
+            "host": host,
+            "url": str(sample.get("url", ""))[:300],
+            "title": str(sample.get("title", ""))[:200],
+            "text": model.clean(sample.get("text", ""))[:1200],
+            "chance": None,
+            "at": int(now),
+        }, ensure_ascii=False) + "\n")
+        out.close()
+    except OSError:
+        pass
+
+
 def classify(sample):
     host = str(sample.get("host", ""))
     url = str(sample.get("url", ""))
@@ -100,6 +152,7 @@ def classify(sample):
 
     machine = MACHINE[0]
     if machine is None:
+        collect(sample)
         return {"ai": False, "confidence": round(min(0.6, total / MARKER_SURE), 3),
                 "quote": quote, "reason": "только признаки, модель не обучена", "model": False}
 
