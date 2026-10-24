@@ -61,7 +61,7 @@ def main():
         return 0
 
     if len(real) < NEED_REAL:
-        sys.stdout.write("\nнастоящих всего %d, нужно хотя бы %d — выбрасывать рано\n"
+        sys.stdout.write("\nнастоящих всего %d, нужно хотя бы %d - выбрасывать рано\n"
                          % (len(real), NEED_REAL))
         return 1
 

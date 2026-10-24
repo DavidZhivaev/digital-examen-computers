@@ -34,7 +34,7 @@ def minutes(clock):
 
 
 def lesson_now(bells=None, when=None):
-    """(идёт ли урок, номер урока). Номер — 0, если урока нет."""
+    """(идёт ли урок, номер урока). Номер - 0, если урока нет."""
     if bells is None:
         bells = read_bells()
     if not bells:
