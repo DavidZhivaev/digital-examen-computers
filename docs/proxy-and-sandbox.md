@@ -118,7 +118,7 @@ HTTPS фильтруется **без подмены сертификатов**:
 В конфигурации компьютера нет и не должно быть адреса VPS:
 
 ```
-DE_SCHOOL_PROXY_HOST="as.1580.ru"
+DE_SCHOOL_PROXY_HOST="ex.1580.ru"
 DE_SCHOOL_PROXY_FALLBACK="sch-1580-2-1580.obr.mos.ru"
 ```
 

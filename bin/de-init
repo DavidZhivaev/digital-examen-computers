@@ -37,7 +37,7 @@ def read_config():
 
 
 CONFIG = read_config()
-API = CONFIG.get("DE_API_URL", "https://as.1580.ru")
+API = CONFIG.get("DE_API_URL", "https://ex.1580.ru")
 PROXY_SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
 COMMAND_SECRET_FILE = CONFIG.get("DE_COMMAND_SECRET_FILE", "/etc/digital-examen/command.secret")
 SCREEN_SECRET_FILE = CONFIG.get("DE_SCREEN_SECRET_FILE", "/etc/digital-examen/screen.secret")
@@ -267,7 +267,7 @@ def main():
         "DE_COMPUTER_ROOM": str(room),
         "DE_COMPUTER_NUMBER": str(number),
         "DE_API_URL": API,
-        "DE_SCREEN_URL": created.get("screen_url", "https://as.1580.ru/screens"),
+        "DE_SCREEN_URL": created.get("screen_url", "https://ex.1580.ru/screens"),
     })
 
     policy = created.get("policy")
