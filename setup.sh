@@ -31,6 +31,11 @@ fail() {
 
 [ "`id -u`" = "0" ] || fail "запускайте от root: sudo sh setup.sh"
 
+if [ -d "$REPO_DIR" ]; then
+    chown -R root:root "$REPO_DIR"
+    chmod -R go-w "$REPO_DIR"
+fi
+
 say "проверяю и доставляю всё нужное"
 sh "$HERE/bin/de-deps" || fail "не хватает обязательных программ, смотрите строки [deps] выше"
 
