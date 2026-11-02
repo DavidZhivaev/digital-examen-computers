@@ -208,7 +208,18 @@ def check_screen():
     else:
         check("запись экрана", GOOD, "служба работает, жалоб в журнале нет")
 
-    queue = CONFIG.get("DE_SCREEN_QUEUE", "/var/lib/digital-examen/screen-queue")
+    url = CONFIG.get("DE_SCREEN_URL", "")
+    if not url:
+        check("приём кадров", BAD, "в настройках нет DE_SCREEN_URL")
+    else:
+        code, _ = run(["/usr/bin/curl", "-fsS", "-o", "/dev/null", "-m", "15",
+                       url.rstrip("/") + "/health"])
+        if code == 0:
+            check("приём кадров", GOOD, url)
+        else:
+            check("приём кадров", BAD, "приёмник не отвечает (%s)" % url)
+
+    queue = CONFIG.get("DE_SCREEN_QUEUE_DIR", "/var/lib/digital-examen/screen-queue")
     if os.path.isdir(queue):
         size = 0
         for name in os.listdir(queue):
@@ -238,8 +249,8 @@ def check_site():
     if not API:
         check("связь с сайтом", BAD, "в настройках нет DE_API_URL")
         return
-    code, _ = run(["/usr/bin/curl", "-sS", "-o", "/dev/null", "-m", "15",
-                   API.rstrip("/") + "/api/health"])
+    code, _ = run(["/usr/bin/curl", "-fsS", "-o", "/dev/null", "-m", "15",
+                   API.rstrip("/") + "/api/auth/health"])
     if code == 0:
         check("связь с сайтом", GOOD, API)
     else:
