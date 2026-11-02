@@ -85,13 +85,13 @@ def post_json(url, body, timeout, headers=None):
 
 
 def ask_challenge():
-    url = CONFIG.get("DE_API_URL", "").rstrip("/") + "/auth/pow/challenge"
+    url = CONFIG.get("DE_API_URL", "").rstrip("/") + "/api/auth/pow/challenge"
     timeout = int(CONFIG.get("DE_API_TIMEOUT", "10"))
     return post_json(url, {"platform": "desktop"}, timeout)
 
 
 def ask_login(login, password, challenge):
-    url = CONFIG.get("DE_API_URL", "").rstrip("/") + "/auth/login"
+    url = CONFIG.get("DE_API_URL", "").rstrip("/") + "/api/auth/login"
     timeout = int(CONFIG.get("DE_API_TIMEOUT", "10"))
     device = CONFIG.get("DE_DEVICE_NAME", "")
     if not device:

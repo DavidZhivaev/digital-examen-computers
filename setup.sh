@@ -86,6 +86,14 @@ if [ ! -f "$CONFIG_FILE" ]; then
     install -m 0640 -o root -g root "$HERE/config/computers.conf.example" "$CONFIG_FILE"
 else
     say "конфиг уже есть, не перезаписываю"
+    ADDED=0
+    for NAME in `grep -o '^DE_[A-Z0-9_]*=' "$HERE/config/computers.conf.example" | tr -d '='`; do
+        if ! grep -q "^$NAME=" "$CONFIG_FILE"; then
+            grep "^$NAME=" "$HERE/config/computers.conf.example" | head -n 1 >> "$CONFIG_FILE"
+            ADDED=`expr $ADDED + 1`
+        fi
+    done
+    [ "$ADDED" = "0" ] || say "дописал новых настроек: $ADDED"
 fi
 
 say "ставлю список «не вскрывать»"

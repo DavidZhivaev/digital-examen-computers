@@ -39,6 +39,7 @@ URL = CONFIG.get("DE_SCREEN_URL", "")
 API = CONFIG.get("DE_API_URL", "")
 COMPUTER = CONFIG.get("DE_COMPUTER_ID", "")
 SECRET_FILE = CONFIG.get("DE_SCREEN_SECRET_FILE", CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret"))
+API_SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
 MODE_FILE = CONFIG.get("DE_SCREEN_MODE_FILE", "/run/digital-examen/screen-mode")
 POLICY_FILE = CONFIG.get("DE_POLICY_FILE", "/run/digital-examen/policy.json")
 
@@ -98,11 +99,11 @@ def ask():
     return json.loads(answer.read().decode("utf-8"))
 
 
-def post(url, payload, timeout=20):
+def post(url, payload, timeout=20, secret_file=None):
     request = urllib.request.Request(url, data=json.dumps(payload).encode())
     request.add_header("Content-Type", "application/json")
     request.add_header("X-De-Computer", COMPUTER)
-    request.add_header("X-De-Secret", read_file(SECRET_FILE))
+    request.add_header("X-De-Secret", read_file(secret_file or SECRET_FILE))
     answer = OPENER.open(request, timeout=timeout)
     return json.loads(answer.read().decode("utf-8"))
 
@@ -323,7 +324,7 @@ def heartbeat_loop():
                 "computer": COMPUTER,
                 "online": True,
                 "login": read_file(LOGIN_FILE),
-            }, timeout=15)
+            }, timeout=15, secret_file=API_SECRET_FILE)
         except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
             pass
         time.sleep(HEARTBEAT_INTERVAL)

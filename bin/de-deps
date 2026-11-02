@@ -97,6 +97,7 @@ need "nft"              "command -v nft"                       nftables nftables
 need "setpriv"          "command -v setpriv"                   util-linux util-linux util-linux || note_missing
 need "ffmpeg"           "command -v ffmpeg"                    ffmpeg ffmpeg ffmpeg || note_missing
 need "ImageMagick"      "command -v magick || command -v convert" imagemagick ImageMagick imagemagick || note_missing
+need "spectacle"         "command -v spectacle"                 kdegraphics-spectacle spectacle spectacle || true
 need "systemd-nspawn"   "command -v systemd-nspawn"            systemd-container systemd-container systemd || note_missing
 need "cryptsetup"       "command -v cryptsetup"                cryptsetup cryptsetup cryptsetup || note_missing
 need "tpm2-tools"       "command -v tpm2_pcrread"              tpm2-tools tpm2.0-tools tpm2-tools || true

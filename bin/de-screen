@@ -72,6 +72,8 @@ QUEUE_LIMIT = int(CONFIG.get("DE_SCREEN_QUEUE_LIMIT_KB", "20480")) * 1024
 QUEUE_MIN_FREE = int(CONFIG.get("DE_SCREEN_MIN_FREE_MB", "512")) * 1024 * 1024
 QUEUE_SEND_PER_CYCLE = int(CONFIG.get("DE_SCREEN_QUEUE_SEND", "3"))
 GREETER_LOGIN = CONFIG.get("DE_SCREEN_GREETER_LOGIN", "_greeter")
+SKIP_GROUPS = CONFIG.get("DE_SCREEN_SKIP_GROUPS", "wheel sudo admin root").split()
+SKIP_USERS = CONFIG.get("DE_SCREEN_SKIP_USERS", "root").split()
 ALWAYS = CONFIG.get("DE_SCREEN_ALWAYS", "1") == "1"
 LOG = CONFIG.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
 
@@ -117,6 +119,7 @@ def read_mode():
 
 
 SCREEN_TARGET = {"display": "", "xauth": ""}
+SESSION_KIND = {"type": ""}
 
 
 def run_quiet(command, env=None):
@@ -147,6 +150,14 @@ def session_rows():
     return rows
 
 
+def session_type_of(login):
+    for session in session_rows():
+        values = session_fields(session)
+        if values.get("Name") == login and values.get("Active") == "yes":
+            return values.get("Type", "")
+    return ""
+
+
 def session_fields(session):
     try:
         output = subprocess.check_output(
@@ -174,6 +185,7 @@ def active_session():
     """
     login = read_file(LOGIN_FILE)
     if login:
+        SESSION_KIND["type"] = session_type_of(login)
         return login, ""
 
     for session in session_rows():
@@ -186,8 +198,75 @@ def active_session():
             continue
         name = values.get("Name", "")
         if name:
+            SESSION_KIND["type"] = values.get("Type", "")
             return name, values.get("Display", "")
+    SESSION_KIND["type"] = ""
     return "", ""
+
+
+ADMIN_CACHE = {}
+
+SUDO = "/usr/bin/sudo"
+
+
+def sudo_grants_everything(login):
+    if not os.path.exists(SUDO):
+        return False
+    try:
+        output = subprocess.check_output(
+            [SUDO, "-n", "-l", "-U", login],
+            stderr=subprocess.DEVNULL,
+        ).decode("utf-8", "replace")
+    except (subprocess.CalledProcessError, OSError):
+        return False
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("("):
+            continue
+        words = line.split(")", 1)[1].split()
+        while words and words[0].endswith(":"):
+            words.pop(0)
+        if words == ["ALL"]:
+            return True
+    return False
+
+
+def is_admin(login):
+    """Записывать экран администратора нельзя.
+
+    За учётку с правами root садится не ученик, а сотрудник школы или
+    наладчик, и его экран к экзамену отношения не имеет. Признак прав - своя
+    группа (wheel/sudo) или правило sudo, разрешающее любую команду; у
+    ученика в de-students разрешены ровно два наших скрипта, поэтому одного
+    факта записи в sudoers мало.
+    """
+    if not login:
+        return False
+    if login in ADMIN_CACHE:
+        return ADMIN_CACHE[login]
+
+    admin = login in SKIP_USERS
+    if not admin:
+        try:
+            entry = pwd.getpwnam(login)
+        except KeyError:
+            entry = None
+        if entry is not None:
+            if entry.pw_uid == 0:
+                admin = True
+            else:
+                try:
+                    names = subprocess.check_output(
+                        ["id", "-nG", login], stderr=subprocess.DEVNULL,
+                    ).decode("utf-8", "replace").split()
+                except (subprocess.CalledProcessError, OSError):
+                    names = []
+                admin = any(name in SKIP_GROUPS for name in names)
+        if not admin:
+            admin = sudo_grants_everything(login)
+
+    ADMIN_CACHE[login] = admin
+    return admin
 
 
 def xauth_candidates(login):
@@ -237,7 +316,97 @@ def grab_with(display, xauth):
     return run_quiet(command, env) == 0
 
 
+WAYLAND_SHOT = CONFIG.get("DE_SCREEN_WAYLAND_TOOL", "/usr/bin/spectacle")
+
+
+def session_env(login):
+    """Переменные сеанса Wayland: берём их у живого процесса этого человека.
+
+    На Wayland снимок делает сам композитор, и попросить его может только
+    программа внутри сеанса - ей нужны шина и сокет Wayland. Надёжнее всего
+    прочитать их у любого процесса сеанса, а не собирать по частям.
+    """
+    try:
+        uid = pwd.getpwnam(login).pw_uid
+    except KeyError:
+        return {}
+
+    for path in sorted(glob.glob("/proc/[0-9]*"), key=len):
+        try:
+            if os.stat(path).st_uid != uid:
+                continue
+            data = open(os.path.join(path, "environ"), "rb").read()
+        except OSError:
+            continue
+        values = {}
+        for item in data.split(b"\0"):
+            if b"=" not in item:
+                continue
+            name, value = item.split(b"=", 1)
+            values[name.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+        if values.get("WAYLAND_DISPLAY") and values.get("DBUS_SESSION_BUS_ADDRESS"):
+            return {
+                "XDG_RUNTIME_DIR": values.get("XDG_RUNTIME_DIR", "/run/user/%d" % uid),
+                "DBUS_SESSION_BUS_ADDRESS": values["DBUS_SESSION_BUS_ADDRESS"],
+                "WAYLAND_DISPLAY": values["WAYLAND_DISPLAY"],
+                "XDG_SESSION_TYPE": "wayland",
+                "DISPLAY": values.get("DISPLAY", ""),
+                "XAUTHORITY": values.get("XAUTHORITY", ""),
+                "HOME": values.get("HOME", ""),
+            }
+    return {}
+
+
+def grab_wayland(login):
+    """Снимок сеанса Wayland.
+
+    Снять окно X11-средствами здесь нельзя: `x11grab` видит только корень
+    XWayland и отдаёт чёрный кадр, а не экран. Композитор отдаёт снимок
+    только доверенной программе, поэтому зовём штатную `spectacle` от имени
+    самого человека и переводим её PNG в тот же сырой кадр, что и на X11.
+    """
+    if not os.path.exists(WAYLAND_SHOT):
+        return False
+    env = session_env(login)
+    if not env:
+        return False
+
+    # Снимок кладётся в каталог самого человека: в наш рабочий каталог
+    # (0700 root) spectacle записать не может и повисает молча.
+    shot = os.path.join(env["XDG_RUNTIME_DIR"], "de-screen.png")
+    if os.path.exists(shot):
+        try:
+            os.remove(shot)
+        except OSError:
+            pass
+
+    # setpriv, а не runuser и не su: те заводят сеанс PAM, а значит и наш
+    # хук сеанса, и снимок повисает.
+    command = [
+        "setpriv", "--reuid", login, "--regid", login, "--init-groups",
+        WAYLAND_SHOT, "-b", "-n", "-f", "-o", shot,
+    ]
+    if run_quiet(command, env) != 0 or not os.path.exists(shot):
+        return False
+
+    done = run_quiet([
+        "ffmpeg", "-loglevel", "error", "-i", shot,
+        "-vf", "scale=%d:%d" % (LIVE_WIDTH, LIVE_HEIGHT),
+        "-pix_fmt", "rgb24", "-f", "rawvideo", "-y", LIVE_RAW,
+    ]) == 0
+    try:
+        os.remove(shot)
+    except OSError:
+        pass
+    return done
+
+
 def grab(login, hint):
+    if SESSION_KIND["type"] == "wayland":
+        if grab_wayland(login):
+            return open(LIVE_RAW, "rb").read()
+        raise OSError("экран не снялся")
+
     if SCREEN_TARGET["display"] and grab_with(SCREEN_TARGET["display"], SCREEN_TARGET["xauth"]):
         return open(LIVE_RAW, "rb").read()
 
@@ -519,6 +688,7 @@ def main():
     watched = 0
     next_store = 0.0
     last_login = ""
+    misses = 0
 
     while True:
         started = time.time()
@@ -530,6 +700,13 @@ def main():
                 time.sleep(STORE_INTERVAL)
                 continue
             login = GREETER_LOGIN
+
+        if is_admin(login):
+            store.reset()
+            live.reset()
+            last_login = login
+            time.sleep(STORE_INTERVAL)
+            continue
 
         if login != last_login:
             store.reset()
@@ -543,7 +720,12 @@ def main():
 
         try:
             raw = grab(login, hint)
+            misses = 0
         except (subprocess.CalledProcessError, OSError):
+            misses += 1
+            if misses in (10, 100, 1000):
+                log("экран не снимается %d раз подряд, сеанс %s (%s)"
+                    % (misses, login, SESSION_KIND["type"] or "неизвестно"))
             time.sleep(STORE_INTERVAL)
             continue
 
