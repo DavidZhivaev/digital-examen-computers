@@ -114,7 +114,10 @@ def ask_informatics(login):
     if not secret:
         return ""
     try:
-        answer = post_json(url, {"login": login}, timeout, {"X-De-Secret": secret})
+        answer = post_json(url, {"login": login}, timeout, {
+            "X-De-Secret": secret,
+            "X-De-Computer": CONFIG.get("DE_COMPUTER_ID", ""),
+        })
         return str(answer.get("informatics", ""))
     except Exception:
         return ""
