@@ -1,5 +1,6 @@
 import os
 import re
+from urllib.parse import urlsplit
 
 POLICY_DIR = os.environ.get("DE_AI_POLICY_DIR", "/etc/digital-examen/policy")
 
@@ -73,6 +74,16 @@ def never_block(host):
 
 def known_ai_host(host):
     return host_hits(host, read_lines("ai-domains.txt"))
+
+
+def known_ai_page(host, url):
+    if host.lower().rstrip(".") not in {"sinonim.org", "www.sinonim.org"} or not url:
+        return False
+    try:
+        page = urlsplit(url)
+    except ValueError:
+        return False
+    return page.hostname == host.lower().rstrip(".") and page.path.rstrip("/") in {"/sin", "/image-edit"}
 
 
 def sentence_around(text, word):

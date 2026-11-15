@@ -27,3 +27,12 @@ chat.z.ai
 chat.kimi.com
 kimi.com
 pi.ai
+giga.chat
+geekbot.ru
+rugpt.io
+study24.ai
+gemin.ru
+chatai.org
+powertext.ru
+gpt.chat
+.chadgpt.ru

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Digital Examen — вкладки",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "permissions": [
     "tabs",
     "nativeMessaging",
@@ -21,5 +21,25 @@
         ]
       }
     }
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.google.com/*",
+        "*://*.google.ru/*",
+        "*://*.google.co.uk/*",
+        "*://*.google.de/*",
+        "*://*.google.fr/*",
+        "*://*.google.com.tr/*",
+        "*://*.google.kz/*",
+        "*://*.google.by/*",
+        "*://*.google.ca/*",
+        "*://*.google.com.au/*"
+      ],
+      "js": [
+        "search.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
 }

@@ -13,6 +13,8 @@ let done = {}
 let port
 let timer
 let busy = false
+let schoolSession = false
+let firstReply = []
 
 function prohibited(title) {
   return rules.some(rule => title.toLowerCase().includes(rule.toLowerCase()))
@@ -51,12 +53,16 @@ function connect() {
   if (port) return
   port = api.runtime.connectNative('ru.digital_examen.tabs')
   port.onDisconnect.addListener(() => {
+    schoolSession = false
+    for (const respond of firstReply.splice(0)) respond(false)
     port = undefined
     rules = []
     clearInterval(timer)
   })
   port.onMessage.addListener(async (message) => {
-    rules = Array.isArray(message.rules) ? message.rules : []
+    schoolSession = Array.isArray(message.rules)
+    rules = schoolSession ? message.rules : []
+    for (const respond of firstReply.splice(0)) respond(schoolSession)
     for (const token of message.close ?? []) {
       const match = [...sessions].find(([, item]) => item.token === token)
       if (!match) { done[token] = false; continue }
@@ -74,6 +80,23 @@ function connect() {
   timer = setInterval(sync, 1500)
   sync()
 }
+
+api.runtime.onMessage.addListener((message, sender, respond) => {
+  if (message.type !== 'school-session') return
+  if (schoolSession || !port) {
+    respond(schoolSession)
+    return
+  }
+  firstReply.push(respond)
+  setTimeout(() => {
+    const position = firstReply.indexOf(respond)
+    if (position >= 0) {
+      firstReply.splice(position, 1)
+      respond(false)
+    }
+  }, 2500)
+  return true
+})
 
 api.alarms.onAlarm.addListener(connect)
 api.alarms.create('reconnect', { periodInMinutes: 0.5 })

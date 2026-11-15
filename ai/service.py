@@ -145,6 +145,14 @@ def classify(sample):
         return {"ai": True, "confidence": 1.0, "quote": host,
                 "reason": "домен ИИ-сервиса", "model": False}
 
+    if markers.known_ai_page(host, url):
+        return {"ai": True, "confidence": 1.0, "quote": "",
+                "reason": "инструмент ИИ", "model": False}
+
+    if host.lower().rstrip(".") in {"sinonim.org", "www.sinonim.org"}:
+        return {"ai": False, "confidence": 1.0, "quote": "",
+                "reason": "смешанный сайт", "model": False}
+
     total, found, quote = markers.score(host, url, title, text)
 
     if total >= MARKER_SURE:
