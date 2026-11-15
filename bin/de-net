@@ -90,20 +90,23 @@ table inet %(table)s {
 
 
 def relay_exception(enable):
-    match = ["-m", "owner", "--uid-owner", "0", "-m", "mark", "--mark",
-             hex(RELAY_MARK), "-p", "tcp", "-m", "multiport", "--dports", "80,443",
-             "-m", "comment", "--comment", "Digital Examen web relay", "-j", "ACCEPT"]
-    for tool in ("iptables", "ip6tables"):
+    for tool, loopback in (("iptables", "127.0.0.1"), ("ip6tables", "::1")):
+        rules = [
+            ["-m", "owner", "--uid-owner", "0", "-m", "mark", "--mark",
+             hex(RELAY_MARK), "-p", "tcp", "-m", "multiport", "--dports", "80,443"],
+            ["-d", loopback, "-p", "tcp", "--dport", str(PROXY_PORT)],
+            ["-d", loopback, "-p", "udp", "--dport", str(DNS_PORT)],
+        ]
         try:
-            def rule(action, *args):
-                result = subprocess.run([tool, "-w", "2", action, "OUTPUT", *args, *match],
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return result.returncode == 0
-            present = rule("-C")
-            if enable and not present:
-                rule("-I", "1")
-            elif not enable and present:
-                rule("-D")
+            for match in rules:
+                match += ["-m", "comment", "--comment", "Digital Examen web relay", "-j", "ACCEPT"]
+                prefix = [tool, "-w", "2"]
+                options = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+                present = subprocess.call(prefix + ["-C", "OUTPUT"] + match, **options) == 0
+                if enable and not present:
+                    subprocess.call(prefix + ["-I", "OUTPUT", "1"] + match, **options)
+                elif not enable and present:
+                    subprocess.call(prefix + ["-D", "OUTPUT"] + match, **options)
         except FileNotFoundError:
             continue
 
