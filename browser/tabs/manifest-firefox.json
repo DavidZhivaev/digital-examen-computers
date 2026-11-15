@@ -17,7 +17,7 @@
       "id": "tabs@digital-examen.local",
       "data_collection_permissions": {
         "required": [
-          "none"
+          "browsingActivity"
         ]
       }
     }
