@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+from concurrent.futures import Future, TimeoutError
 import ipaddress
 import json
 import os
@@ -23,6 +24,8 @@ PROXY_PORT = 3129
 DNS_PORT = 5399
 TABLE = "de_agent"
 RELAY_MARK = 0x44450000
+RELAY_DIRECT = de_common.setting("DE_NET_RELAY_DIRECT", "0") == "1"
+RELAY_RULE = ["pref", "8999", "fwmark", hex(RELAY_MARK) + "/0xffffffff", "lookup", "main"]
 POLICY_FILE = os.path.join(de_common.STATE_DIR, "policy.json")
 TRAFFIC_SOCKET = os.path.join(de_common.RUN_DIR, "traffic.sock")
 AI_URL = de_common.setting("DE_API_URL", "").rstrip("/") + "/api/computers/device/ai"
@@ -32,6 +35,7 @@ PEOPLE_EVERY = 30
 SEEN = {}
 TOLD = {}
 AI_CACHE = {}
+AI_PENDING = {}
 AI_HOSTS = de_patterns.read_list(os.path.join(
     de_common.setting("DE_REPO_DIR", "/opt/digital-examen-computers"),
     "proxy", "policy", "ai-domains.txt",
@@ -115,7 +119,16 @@ def relay_exception(enable):
             continue
 
 
+def relay_route(enable):
+    try:
+        return subprocess.call(["ip", "-4", "rule", "add" if enable else "del", *RELAY_RULE],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+    except FileNotFoundError:
+        return False
+
+
 def rules_down():
+    relay_route(False)
     subprocess.call(["nft", "delete", "table", "inet", TABLE],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -162,21 +175,36 @@ def policy():
 def ask_ai(host):
     with LOCK:
         known = AI_CACHE.get(host)
-    if known and time.time() - known[1] < 3600:
-        return known[0]
+        if known and time.monotonic() - known[1] < 3600:
+            return known[0]
+        pending = AI_PENDING.get(host)
+        owner = pending is None
+        if owner:
+            pending = AI_PENDING[host] = Future()
+    if not owner:
+        try:
+            return pending.result(timeout=2)
+        except TimeoutError:
+            return False
+
     answer = False
     try:
         request = urllib.request.Request(AI_URL, data=json.dumps({"host": host}).encode())
         request.add_header("Content-Type", "application/json")
         request.add_header("X-De-Computer", de_common.computer())
         request.add_header("X-De-Secret", de_common.secret("proxy"))
-        reply = json.loads(urllib.request.urlopen(request, timeout=2).read().decode("utf-8"))
+        with urllib.request.urlopen(request, timeout=2) as response:
+            reply = json.loads(response.read().decode("utf-8"))
         answer = bool(reply.get("ai"))
+        with LOCK:
+            AI_CACHE[host] = (answer, time.monotonic())
+        return answer
     except (OSError, ValueError):
         return False
-    with LOCK:
-        AI_CACHE[host] = (answer, time.time())
-    return answer
+    finally:
+        pending.set_result(answer)
+        with LOCK:
+            AI_PENDING.pop(host, None)
 
 
 def decide(host):
@@ -378,10 +406,6 @@ class Handler(socketserver.BaseRequestHandler):
 
     def handle(self):
         client = self.request
-        try:
-            ip, port = original_target(client)
-        except OSError:
-            return
         login = owner_of(self.client_address)
         if not login:
             return
@@ -399,6 +423,10 @@ class Handler(socketserver.BaseRequestHandler):
             host, port, data, tunnel = proxy
             ip = host
         else:
+            try:
+                ip, port = original_target(client)
+            except OSError:
+                return
             host = sni_of(data) if secure else host_of(data)
             tunnel = False
         if not host:
@@ -443,6 +471,7 @@ class Handler(socketserver.BaseRequestHandler):
 
 
 class Server(socketserver.ThreadingTCPServer):
+    request_queue_size = 128
     allow_reuse_address = True
     daemon_threads = True
 
@@ -554,6 +583,8 @@ def main():
     if not rules_up() or not update_people():
         log("правила сети не поставились")
         return 1
+    if RELAY_DIRECT and not relay_route(True):
+        log("не удалось настроить прямой маршрут веб-реле")
     threading.Thread(target=people_loop, daemon=True).start()
     log("ограничения сети запущены")
     try:
