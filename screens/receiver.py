@@ -1,8 +1,10 @@
 #!/usr/bin/python3
 
+import fcntl
 import json
 import os
 import subprocess
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -190,7 +192,9 @@ def store_frame(header, blobs):
     out.write(json.dumps(meta))
     out.close()
 
-    note_record(folder, header, written)
+    with open(os.path.join(folder, ".record.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        note_record(folder, header, written)
     return written
 
 
@@ -213,14 +217,14 @@ def note_record(folder, header, written):
         except ValueError:
             pass
 
-    record["last"] = header["time"]
+    record["last"] = max(int(record["last"]), header["time"])
     record["frames"] = int(record.get("frames", 0)) + 1
     record["bytes"] = int(record.get("bytes", 0)) + written
     record["seconds"] = max(0, record["last"] - record["started"])
 
-    out = open(path, "w")
-    out.write(json.dumps(record))
-    out.close()
+    with open(path + ".new", "w") as out:
+        json.dump(record, out)
+    os.replace(path + ".new", path)
 
 
 def watch_space():
@@ -473,7 +477,12 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 for name in names:
                     if name:
+                        previous = WATCHED.get(name)
                         WATCHED[name] = (now, interval)
+                        if not previous or now - previous[0] > 6 or previous[1] != interval:
+                            queue = QUEUES.setdefault(name, [])
+                            queue[:] = [command for command in queue if command.get("name") != "live"]
+                            queue.append({"name": "live", "interval": interval})
             self.reply(200, {"ok": True, "watched": names, "interval": interval})
             return
 
@@ -487,15 +496,15 @@ class Handler(BaseHTTPRequestHandler):
                 computer = safe_name(item)
                 if not computer:
                     continue
-                queue_command(computer, {"name": name, "delay": "now"})
+                queue_command(computer, {"name": "exec", "text": "poweroff" if name == "shutdown" else "reboot"})
                 sent.append(computer)
             self.reply(200, {"ok": True, "sent": sent})
             return
 
         if parts[0] == "shot" and len(parts) == 2:
             path = os.path.join(LIVE_DIR, safe_name(parts[1]) + ".webp")
-            if not os.path.exists(path):
-                self.reply(404, {"error": "no shot"})
+            if not os.path.exists(path) or time.time() - os.path.getmtime(path) > 12:
+                self.reply(404, {"error": "no fresh shot"})
                 return
             self.send_blob(open(path, "rb").read(), "image/webp")
             return
@@ -506,7 +515,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parts[0] == "record" and len(parts) == 3:
-            self.send_record(safe_name(parts[1]), parts[2])
+            self.send_record(safe_name(parts[1]), parts[2], query)
             return
 
         self.reply(404, {"error": "unknown path"})
@@ -533,26 +542,40 @@ class Handler(BaseHTTPRequestHandler):
 
         self.reply(200, {"commands": [], "interval": watched_interval(computer)})
 
-    def send_record(self, computer, record_id):
-        folder = find_record(computer, record_id)
+    def send_record(self, computer, record_id, query):
+        folder = find_record(computer, record_id, query)
         if folder is None:
             self.reply(404, {"error": "no record"})
             return
 
-        target = os.path.join("/tmp", "de-record-%s-%s.webm" % (computer, safe_name(record_id)))
-        if not os.path.exists(target):
-            code = subprocess.call(
-                ["nice", "-n", "19", PYTHON, GLUE, folder, target],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            if code != 0 or not os.path.exists(target):
+        with tempfile.TemporaryDirectory(prefix="de-record-") as work:
+            target = os.path.join(work, "video.webm")
+            try:
+                code = subprocess.call([PYTHON, GLUE, folder, target], timeout=220)
+            except subprocess.TimeoutExpired:
+                self.reply(504, {"error": "превышено время подготовки записи"})
+                return
+            if code != 0 or not os.path.isfile(target) or not os.path.getsize(target):
                 self.reply(500, {"error": "не удалось склеить запись"})
                 return
+            with open(target, "rb") as video:
+                self.send_blob(video.read(), "video/webm")
 
-        self.send_blob(open(target, "rb").read(), "video/webm")
 
+def find_record(computer, record_id, query):
+    try:
+        started = int(query.get("started", ["0"])[0])
+        login = query.get("login", [""])[0]
+        if started > 0:
+            folder = login_dir(computer, login, started)
+            with open(os.path.join(folder, "record.json")) as source:
+                record = json.load(source)
+            saved_id = record.get("id")
+            if (not saved_id or str(saved_id) == str(record_id)) and record.get("started") == started:
+                return folder
+    except (OSError, ValueError, OverflowError):
+        pass
 
-def find_record(computer, record_id):
     if not os.path.isdir(DATA_DIR):
         return None
     for day in sorted(os.listdir(DATA_DIR), reverse=True):
@@ -566,7 +589,7 @@ def find_record(computer, record_id):
                 continue
             try:
                 record = json.loads(open(path).read())
-            except ValueError:
+            except (OSError, ValueError):
                 continue
             if str(record.get("id", "")) == str(record_id):
                 return folder

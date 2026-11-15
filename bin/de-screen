@@ -1,451 +1,189 @@
 #!/usr/bin/python3
 
 import glob
+import io
 import json
 import os
 import pwd
 import shutil
-import ssl
-import subprocess
+import stat
 import sys
+import threading
+import tempfile
 import time
-import urllib.error
 import urllib.request
 import zlib
 
+from PIL import Image
+
 sys.path.insert(0, "/usr/local/lib/digital-examen")
 
-import de_time
+import de_common
 
-CONFIG_FILE = "/etc/digital-examen/computers.conf"
-LOGIN_FILE = "/run/digital-examen/current-login"
+URL = de_common.setting("DE_SCREEN_URL")
+COMPUTER = de_common.computer()
 
+LIVE_SIZE = (1280, 720)
+STORE_SIZE = (1024, 576)
+TILE = 16
+QUALITY = int(de_common.setting("DE_SCREEN_QUALITY", "50"))
+KEY_EVERY = 120
+KEY_SHARE = 40
+STORE_INTERVAL = float(de_common.setting("DE_SCREEN_INTERVAL", "2"))
+LIVE_INTERVAL = 0.5
+WATCH_INTERVAL = 1.5
+GRAB_SECONDS = 6
 
-def read_config():
-    values = {}
-    if not os.path.exists(CONFIG_FILE):
-        return values
-    data = open(CONFIG_FILE)
-    for line in data:
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        name, value = line.split("=", 1)
-        value = value.strip()
-        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        values[name.strip()] = value
-    data.close()
-    return values
-
-
-CONFIG = read_config()
-URL = CONFIG.get("DE_SCREEN_URL", "")
-COMPUTER = CONFIG.get("DE_COMPUTER_ID", "")
-
-LIVE_WIDTH = int(CONFIG.get("DE_SCREEN_WIDTH", "1280"))
-LIVE_HEIGHT = int(CONFIG.get("DE_SCREEN_HEIGHT", "720"))
-STORE_WIDTH = int(CONFIG.get("DE_SCREEN_STORE_WIDTH", "1024"))
-STORE_HEIGHT = int(CONFIG.get("DE_SCREEN_STORE_HEIGHT", "576"))
-
-TILE = int(CONFIG.get("DE_SCREEN_TILE", "16"))
-QUALITY = CONFIG.get("DE_SCREEN_QUALITY", "50")
-COLORS = int(CONFIG.get("DE_SCREEN_COLORS", "8"))
-KEY_EVERY = int(CONFIG.get("DE_SCREEN_KEYFRAME_EVERY", "120"))
-KEY_SHARE = int(CONFIG.get("DE_SCREEN_KEYFRAME_SHARE", "40"))
-
-STORE_INTERVAL = float(CONFIG.get("DE_SCREEN_INTERVAL", "2"))
-WATCH_INTERVAL = float(CONFIG.get("DE_SCREEN_WATCH_INTERVAL", "2"))
-LIVE_INTERVAL = float(CONFIG.get("DE_SCREEN_LIVE_INTERVAL", "1"))
-
-# Писать ли архив на переменах. Выключение экономит около пятой части
-# диска, но тогда переменa остаётся незаписанной — решение школы, а не
-# наше, поэтому по умолчанию пишем всегда.
-SKIP_BREAKS = CONFIG.get("DE_SCREEN_LESSONS_ONLY", "0") == "1"
-
-WORK_DIR = CONFIG.get("DE_SCREEN_WORK_DIR", "/run/digital-examen/screen")
-SECRET_FILE = CONFIG.get("DE_SCREEN_SECRET_FILE", CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret"))
-MODE_FILE = CONFIG.get("DE_SCREEN_MODE_FILE", "/run/digital-examen/screen-mode")
-
-QUEUE_DIR = CONFIG.get("DE_SCREEN_QUEUE_DIR", "/var/lib/digital-examen/screen-queue")
-QUEUE_LIMIT = int(CONFIG.get("DE_SCREEN_QUEUE_LIMIT_KB", "20480")) * 1024
-QUEUE_MIN_FREE = int(CONFIG.get("DE_SCREEN_MIN_FREE_MB", "512")) * 1024 * 1024
-QUEUE_SEND_PER_CYCLE = int(CONFIG.get("DE_SCREEN_QUEUE_SEND", "3"))
-GREETER_LOGIN = CONFIG.get("DE_SCREEN_GREETER_LOGIN", "_greeter")
-SKIP_GROUPS = CONFIG.get("DE_SCREEN_SKIP_GROUPS", "wheel sudo admin root").split()
-SKIP_USERS = CONFIG.get("DE_SCREEN_SKIP_USERS", "root").split()
-ALWAYS = CONFIG.get("DE_SCREEN_ALWAYS", "1") == "1"
-LOG = CONFIG.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
-
-LIVE_RAW = os.path.join(WORK_DIR, "live.rgb")
-STORE_RAW = os.path.join(WORK_DIR, "store.rgb")
+WORK_DIR = os.path.join(de_common.RUN_DIR, "screen")
+MODE_FILE = os.path.join(de_common.RUN_DIR, "screen-mode")
+QUEUE_DIR = os.path.join(de_common.STATE_DIR, "screen-queue")
+QUEUE_LIMIT = 20 * 1024 * 1024
+QUEUE_MIN_FREE = 512 * 1024 * 1024
+WAYLAND_SHOT = "/usr/bin/spectacle"
 
 
 def log(message):
-    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        out = open(LOG, "a")
-        out.write(stamp + " de-screen " + message + "\n")
-        out.close()
-    except IOError:
-        pass
-
-
-def build_opener():
-    ca = CONFIG.get("DE_SCREEN_CA", "")
-    if not ca or not os.path.exists(ca):
-        return urllib.request.build_opener()
-    context = ssl.create_default_context(cafile=ca)
-    context.check_hostname = True
-    context.verify_mode = ssl.CERT_REQUIRED
-    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
-
-
-OPENER = build_opener()
-
-
-def read_file(path):
-    if not os.path.exists(path):
-        return ""
-    return open(path).read().strip()
+    de_common.log("de-screen", message)
 
 
 def read_mode():
-    value = read_file(MODE_FILE)
     try:
-        return int(value)
+        return int(de_common.read_file(MODE_FILE) or "0")
     except ValueError:
         return 0
 
 
-SCREEN_TARGET = {"display": "", "xauth": ""}
-SESSION_KIND = {"type": ""}
-
-
-def run_quiet(command, env=None):
-    merged = dict(os.environ)
-    if env:
-        merged.update(env)
-    return subprocess.call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=merged)
-
-
-LOGINCTL = "/usr/bin/loginctl"
-if not os.path.exists(LOGINCTL):
-    LOGINCTL = "/bin/loginctl"
-
-
-def session_rows():
-    try:
-        output = subprocess.check_output(
-            [LOGINCTL, "list-sessions", "--no-legend"],
-            stderr=subprocess.DEVNULL,
-        ).decode("utf-8", "replace")
-    except (subprocess.CalledProcessError, OSError):
-        return []
-    rows = []
-    for line in output.splitlines():
-        parts = line.split()
-        if parts:
-            rows.append(parts[0])
-    return rows
-
-
-def session_type_of(login):
-    for session in session_rows():
-        values = session_fields(session)
-        if values.get("Name") == login and values.get("Active") == "yes":
-            return values.get("Type", "")
-    return ""
-
-
-def session_fields(session):
-    try:
-        output = subprocess.check_output(
-            [LOGINCTL, "show-session", session,
-             "-p", "Name", "-p", "Active", "-p", "Type", "-p", "Display", "-p", "Class"],
-            stderr=subprocess.DEVNULL,
-        ).decode("utf-8", "replace")
-    except (subprocess.CalledProcessError, OSError):
-        return {}
-    values = {}
-    for line in output.splitlines():
-        if "=" in line:
-            name, value = line.split("=", 1)
-            values[name.strip()] = value.strip()
-    return values
-
-
-def active_session():
-    """Кто сидит за компьютером прямо сейчас.
-
-    Сначала берётся логин, который положил de-enter-net: это ученик в
-    песочнице. Если файла нет, значит сеанс не наш — учитель, администратор
-    или штатная учётка машины, — и сеанс ищется через loginctl. Запись не
-    зависит от того, кто вошёл: пишем всегда.
-    """
-    login = read_file(LOGIN_FILE)
-    if login:
-        SESSION_KIND["type"] = session_type_of(login)
-        return login, ""
-
-    for session in session_rows():
-        values = session_fields(session)
-        if values.get("Class") == "greeter":
-            continue
-        if values.get("Active") != "yes":
-            continue
-        if values.get("Type") not in ("x11", "wayland"):
-            continue
-        name = values.get("Name", "")
-        if name:
-            SESSION_KIND["type"] = values.get("Type", "")
-            return name, values.get("Display", "")
-    SESSION_KIND["type"] = ""
-    return "", ""
-
-
-ADMIN_CACHE = {}
-
-SUDO = "/usr/bin/sudo"
-
-
-def sudo_grants_everything(login):
-    if not os.path.exists(SUDO):
-        return False
-    try:
-        output = subprocess.check_output(
-            [SUDO, "-n", "-l", "-U", login],
-            stderr=subprocess.DEVNULL,
-        ).decode("utf-8", "replace")
-    except (subprocess.CalledProcessError, OSError):
-        return False
-    for line in output.splitlines():
-        line = line.strip()
-        if not line.startswith("("):
-            continue
-        words = line.split(")", 1)[1].split()
-        while words and words[0].endswith(":"):
-            words.pop(0)
-        if words == ["ALL"]:
-            return True
-    return False
-
-
-def is_admin(login):
-    """Записывать экран администратора нельзя.
-
-    За учётку с правами root садится не ученик, а сотрудник школы или
-    наладчик, и его экран к экзамену отношения не имеет. Признак прав - своя
-    группа (wheel/sudo) или правило sudo, разрешающее любую команду; у
-    ученика в de-students разрешены ровно два наших скрипта, поэтому одного
-    факта записи в sudoers мало.
-    """
-    if not login:
-        return False
-    if login in ADMIN_CACHE:
-        return ADMIN_CACHE[login]
-
-    admin = login in SKIP_USERS
-    if not admin:
-        try:
-            entry = pwd.getpwnam(login)
-        except KeyError:
-            entry = None
-        if entry is not None:
-            if entry.pw_uid == 0:
-                admin = True
-            else:
-                try:
-                    names = subprocess.check_output(
-                        ["id", "-nG", login], stderr=subprocess.DEVNULL,
-                    ).decode("utf-8", "replace").split()
-                except (subprocess.CalledProcessError, OSError):
-                    names = []
-                admin = any(name in SKIP_GROUPS for name in names)
-        if not admin:
-            admin = sudo_grants_everything(login)
-
-    ADMIN_CACHE[login] = admin
-    return admin
-
-
-def xauth_candidates(login):
+def xauth_files(login, display):
     out = []
-    env_auth = os.environ.get("XAUTHORITY", "")
-    if env_auth:
-        out.append(env_auth)
-    if login:
-        try:
-            home = pwd.getpwnam(login).pw_dir
-            out.append(os.path.join(home, ".Xauthority"))
-            uid = pwd.getpwnam(login).pw_uid
-            out.extend(sorted(glob.glob("/run/user/%d/xauth_*" % uid)))
-        except KeyError:
-            pass
+    try:
+        entry = pwd.getpwnam(login)
+        env = de_common.user_env(entry.pw_uid, "XAUTHORITY")
+        if env.get("DISPLAY") == display and env.get("XAUTHORITY"):
+            out.append(env["XAUTHORITY"])
+        out.extend(sorted(glob.glob("/run/user/%d/xauth_*" % entry.pw_uid)))
+        out.append(os.path.join(entry.pw_dir, ".Xauthority"))
+    except KeyError:
+        pass
     out.extend(sorted(glob.glob("/run/sddm/*")))
     out.extend(sorted(glob.glob("/var/run/sddm/*")))
     out.append("")
     return out
 
 
-def display_candidates(hint):
-    out = []
-    if hint:
-        out.append(hint)
-    if os.environ.get("DISPLAY"):
-        out.append(os.environ["DISPLAY"])
-    out.extend([":0", ":1"])
-    seen = []
-    for item in out:
-        if item and item not in seen:
-            seen.append(item)
-    return seen
+def to_image(data):
+    picture = Image.open(io.BytesIO(data))
+    picture = picture.convert("RGB")
+    if picture.size != LIVE_SIZE:
+        picture = picture.resize(LIVE_SIZE, Image.BILINEAR)
+    return picture
 
 
-def grab_with(display, xauth):
-    command = [
-        "ffmpeg", "-loglevel", "error",
-        "-f", "x11grab", "-i", display,
-        "-frames:v", "1",
-        "-vf", "scale=%d:%d" % (LIVE_WIDTH, LIVE_HEIGHT),
-        "-pix_fmt", "rgb24", "-f", "rawvideo", "-y", LIVE_RAW,
-    ]
-    env = {"DISPLAY": display}
+def grab_x11(display, xauth):
+    target = os.path.join(WORK_DIR, "x11.png")
+    env = {"DISPLAY": display, "PATH": "/usr/bin:/bin"}
     if xauth:
         env["XAUTHORITY"] = xauth
-    return run_quiet(command, env) == 0
-
-
-WAYLAND_SHOT = CONFIG.get("DE_SCREEN_WAYLAND_TOOL", "/usr/bin/spectacle")
-
-
-def session_env(login):
-    """Переменные сеанса Wayland: берём их у живого процесса этого человека.
-
-    На Wayland снимок делает сам композитор, и попросить его может только
-    программа внутри сеанса - ей нужны шина и сокет Wayland. Надёжнее всего
-    прочитать их у любого процесса сеанса, а не собирать по частям.
-    """
-    try:
-        uid = pwd.getpwnam(login).pw_uid
-    except KeyError:
-        return {}
-
-    for path in sorted(glob.glob("/proc/[0-9]*"), key=len):
-        try:
-            if os.stat(path).st_uid != uid:
-                continue
-            data = open(os.path.join(path, "environ"), "rb").read()
-        except OSError:
-            continue
-        values = {}
-        for item in data.split(b"\0"):
-            if b"=" not in item:
-                continue
-            name, value = item.split(b"=", 1)
-            values[name.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
-        if values.get("WAYLAND_DISPLAY") and values.get("DBUS_SESSION_BUS_ADDRESS"):
-            return {
-                "XDG_RUNTIME_DIR": values.get("XDG_RUNTIME_DIR", "/run/user/%d" % uid),
-                "DBUS_SESSION_BUS_ADDRESS": values["DBUS_SESSION_BUS_ADDRESS"],
-                "WAYLAND_DISPLAY": values["WAYLAND_DISPLAY"],
-                "XDG_SESSION_TYPE": "wayland",
-                "DISPLAY": values.get("DISPLAY", ""),
-                "XAUTHORITY": values.get("XAUTHORITY", ""),
-                "HOME": values.get("HOME", ""),
-            }
-    return {}
+    code, output = de_common.run([
+        "ffmpeg", "-loglevel", "error", "-f", "x11grab", "-i", display,
+        "-frames:v", "1", "-y", target,
+    ], GRAB_SECONDS, env)
+    if code != 0 or not os.path.exists(target):
+        return None
+    data = open(target, "rb").read()
+    os.remove(target)
+    return to_image(data)
 
 
 def grab_wayland(login):
-    """Снимок сеанса Wayland.
-
-    Снять окно X11-средствами здесь нельзя: `x11grab` видит только корень
-    XWayland и отдаёт чёрный кадр, а не экран. Композитор отдаёт снимок
-    только доверенной программе, поэтому зовём штатную `spectacle` от имени
-    самого человека и переводим её PNG в тот же сырой кадр, что и на X11.
-    """
-    if not os.path.exists(WAYLAND_SHOT):
-        return False
-    env = session_env(login)
-    if not env:
-        return False
-
-    # Снимок кладётся в каталог самого человека: в наш рабочий каталог
-    # (0700 root) spectacle записать не может и повисает молча.
-    shot = os.path.join(env["XDG_RUNTIME_DIR"], "de-screen.png")
-    if os.path.exists(shot):
-        try:
-            os.remove(shot)
-        except OSError:
-            pass
-
-    # setpriv, а не runuser и не su: те заводят сеанс PAM, а значит и наш
-    # хук сеанса, и снимок повисает.
-    command = [
-        "setpriv", "--reuid", login, "--regid", login, "--init-groups",
-        WAYLAND_SHOT, "-b", "-n", "-f", "-o", shot,
-    ]
-    if run_quiet(command, env) != 0 or not os.path.exists(shot):
-        return False
-
-    done = run_quiet([
-        "ffmpeg", "-loglevel", "error", "-i", shot,
-        "-vf", "scale=%d:%d" % (LIVE_WIDTH, LIVE_HEIGHT),
-        "-pix_fmt", "rgb24", "-f", "rawvideo", "-y", LIVE_RAW,
-    ]) == 0
     try:
-        os.remove(shot)
-    except OSError:
-        pass
-    return done
+        entry = pwd.getpwnam(login)
+    except KeyError:
+        return None
+    values = de_common.user_env(entry.pw_uid, "WAYLAND_DISPLAY")
+    if not values:
+        return None
+    env = de_common.session_env(entry, values)
+    env["QT_QPA_PLATFORM"] = "wayland"
+    env["QT_QUICK_BACKEND"] = "software"
+    env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+    try:
+        with tempfile.TemporaryDirectory(dir=WORK_DIR) as folder:
+            os.chown(folder, entry.pw_uid, entry.pw_gid)
+            env["XDG_CONFIG_HOME"] = folder
+            env["XDG_CACHE_HOME"] = folder
+            shot = os.path.join(folder, "screen.png")
+            code, _ = de_common.run([
+                "/usr/bin/setpriv", "--reuid", str(entry.pw_uid), "--regid", str(entry.pw_gid),
+                "--init-groups", WAYLAND_SHOT, "-b", "-n", "-i", "-f", "-o", shot,
+            ], GRAB_SECONDS, env)
+            if code:
+                return None
+            descriptor = os.open(shot, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb") as source:
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    return None
+                return to_image(source.read(32 * 1024 * 1024))
+    except (OSError, ValueError):
+        return None
 
 
-def grab(login, hint):
-    if SESSION_KIND["type"] == "wayland":
-        if grab_wayland(login):
-            return open(LIVE_RAW, "rb").read()
-        raise OSError("экран не снялся")
+class Target:
 
-    if SCREEN_TARGET["display"] and grab_with(SCREEN_TARGET["display"], SCREEN_TARGET["xauth"]):
-        return open(LIVE_RAW, "rb").read()
-
-    for display in display_candidates(hint):
-        for xauth in xauth_candidates(login):
-            if grab_with(display, xauth):
-                SCREEN_TARGET["display"] = display
-                SCREEN_TARGET["xauth"] = xauth
-                return open(LIVE_RAW, "rb").read()
-
-    SCREEN_TARGET["display"] = ""
-    SCREEN_TARGET["xauth"] = ""
-    raise OSError("экран не снялся")
+    def __init__(self):
+        self.key = ""
+        self.display = ""
+        self.xauth = ""
 
 
-def shrink():
-    command = [
-        "magick", "-size", "%dx%d" % (LIVE_WIDTH, LIVE_HEIGHT), "-depth", "8", "rgb:" + LIVE_RAW,
-        "-resize", "%dx%d!" % (STORE_WIDTH, STORE_HEIGHT),
-        "-depth", "8", "rgb:" + STORE_RAW,
-    ]
-    subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return open(STORE_RAW, "rb").read()
+TARGET = Target()
+
+
+def grab(session):
+    login = session.get("Name", "")
+    if session.get("Type") == "wayland" and session.get("Class") != "greeter":
+        return grab_wayland(login)
+
+    key = session.get("Id", "")
+    if TARGET.key == key and TARGET.display:
+        picture = grab_x11(TARGET.display, TARGET.xauth)
+        if picture is not None:
+            return picture
+
+    display = session.get("Display", "")
+    if not display and session.get("Leader"):
+        display = de_common.process_env(session["Leader"]).get("DISPLAY", "")
+    displays = [display] if display else []
+    for display in displays:
+        for xauth in xauth_files(login, display):
+            picture = grab_x11(display, xauth)
+            if picture is not None:
+                TARGET.key = key
+                TARGET.display = display
+                TARGET.xauth = xauth
+                return picture
+    TARGET.key = ""
+    if session.get("Type") == "wayland":
+        return grab_wayland(login)
+    return None
+
+
+def webp(picture):
+    out = io.BytesIO()
+    picture.save(out, "WEBP", quality=QUALITY, method=0)
+    return out.getvalue()
 
 
 class Stream:
 
-    def __init__(self, kind, width, height, raw):
+    def __init__(self, kind, size):
         self.kind = kind
-        self.raw = raw
-        self.palette = os.path.join(WORK_DIR, "palette-" + kind + ".png")
-        self.frame_no = 0
-        self.resize(width, height)
+        self.frame_no = int(time.time() * 1000)
+        self.resize(size)
 
-    def resize(self, width, height):
-        self.width = width
-        self.height = height
-        self.cols = width // TILE
-        self.rows = height // TILE
+    def resize(self, size):
+        self.size = size
+        self.cols = size[0] // TILE
+        self.rows = size[1] // TILE
         self.total = self.cols * self.rows
         self.reset()
 
@@ -453,36 +191,22 @@ class Stream:
         self.previous = None
         self.since_key = 0
 
-    def hashes(self, data):
+    def hashes(self, picture):
+        data = picture.tobytes()
+        stride = self.size[0] * 3
+        width = TILE * 3
         out = []
-        stride = self.width * 3
-        width_bytes = TILE * 3
         for row in range(self.rows):
             for col in range(self.cols):
                 value = 0
-                left = col * width_bytes
+                left = col * width
                 for y in range(row * TILE, row * TILE + TILE):
                     start = y * stride + left
-                    value = zlib.crc32(data[start:start + width_bytes], value)
+                    value = zlib.crc32(data[start:start + width], value)
                 out.append(value)
         return out
 
-    def palette_args(self):
-        if COLORS <= 0 or not os.path.exists(self.palette):
-            return []
-        return ["+dither", "-remap", self.palette]
-
-    def make_palette(self):
-        if COLORS <= 0:
-            return
-        command = [
-            "magick", "-size", "%dx%d" % (self.width, self.height),
-            "-depth", "8", "rgb:" + self.raw,
-            "-kmeans", str(COLORS), self.palette,
-        ]
-        subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    def find_runs(self, changed):
+    def runs(self, changed):
         marks = set(changed)
         out = []
         for row in range(self.rows):
@@ -497,37 +221,8 @@ class Stream:
                     col += 1
         return out
 
-    def encode_run(self, run):
-        col, row, width = run
-        path = os.path.join(WORK_DIR, "%s-r%d_%d.webp" % (self.kind, col, row))
-        command = [
-            "magick", "-size", "%dx%d" % (self.width, self.height),
-            "-depth", "8", "rgb:" + self.raw,
-            "-crop", "%dx%d+%d+%d" % (width * TILE, TILE, col * TILE, row * TILE), "+repage",
-        ] + self.palette_args() + [
-            "-quality", QUALITY, "webp:" + path,
-        ]
-        subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        data = open(path, "rb").read()
-        os.remove(path)
-        return data
-
-    def encode_full(self):
-        path = os.path.join(WORK_DIR, self.kind + "-full.webp")
-        command = [
-            "magick", "-size", "%dx%d" % (self.width, self.height),
-            "-depth", "8", "rgb:" + self.raw,
-        ] + self.palette_args() + [
-            "-quality", QUALITY, "webp:" + path,
-        ]
-        subprocess.check_call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        data = open(path, "rb").read()
-        os.remove(path)
-        return data
-
-    def build(self, data):
-        current = self.hashes(data)
-
+    def build(self, picture):
+        current = self.hashes(picture)
         if self.previous is None:
             changed = list(range(self.total))
         else:
@@ -538,249 +233,220 @@ class Stream:
             keyframe = True
 
         if keyframe:
-            self.make_palette()
-            pieces = [[(-1, 0, 0), self.encode_full()]]
+            pieces = [[(-1, 0, 0), webp(picture)]]
         else:
-            pieces = [[run, self.encode_run(run)] for run in self.find_runs(changed)]
-
+            pieces = []
+            for col, row, width in self.runs(changed):
+                box = (col * TILE, row * TILE, (col + width) * TILE, row * TILE + TILE)
+                pieces.append([(col, row, width), webp(picture.crop(box))])
         return current, keyframe, pieces
 
-    def header(self, login, keyframe, pieces):
-        return {
+    def body(self, login, keyframe, pieces):
+        header = {
             "version": 4,
             "kind": self.kind,
             "computer": COMPUTER,
             "login": login,
             "frame": self.frame_no,
             "time": int(time.time()),
-            "size": [self.width, self.height],
+            "size": [self.size[0], self.size[1]],
             "grid": [self.cols, self.rows],
             "tile": TILE,
             "keyframe": keyframe,
             "pieces": [[run[0], run[1], run[2], len(blob)] for run, blob in pieces],
         }
+        data = json.dumps(header).encode() + b"\n"
+        for run, blob in pieces:
+            data += blob
+        return data
 
 
 def post_body(body):
     request = urllib.request.Request(URL.rstrip("/") + "/frame", data=body)
     request.add_header("Content-Type", "application/octet-stream")
     request.add_header("X-De-Computer", COMPUTER)
-    request.add_header("X-De-Secret", read_file(SECRET_FILE))
-    answer = OPENER.open(request, timeout=20)
+    request.add_header("X-De-Secret", de_common.secret("screen"))
+    answer = urllib.request.urlopen(request, timeout=10)
     return json.loads(answer.read().decode("utf-8"))
 
 
 def queue_files():
-    if not os.path.isdir(QUEUE_DIR):
-        return []
     return sorted(glob.glob(os.path.join(QUEUE_DIR, "*.frame")))
 
 
-def queue_size(files):
-    total = 0
-    for path in files:
-        try:
-            total += os.path.getsize(path)
-        except OSError:
-            continue
-    return total
-
-
-def free_bytes():
-    try:
-        return shutil.disk_usage(QUEUE_DIR).free
-    except OSError:
-        return QUEUE_MIN_FREE
-
-
 def drop_oldest(files, needed):
-    """Места нет — уходит самая старая запись, а не новая.
-
-    Правило одно на всю систему: заканчивается диск — удаляем самое старое.
-    Так свежая запись никогда не теряется из-за того, что очередь копилась
-    неделю, пока компьютер стоял без сети.
-    """
     freed = 0
-    removed = 0
     for path in files:
         if freed >= needed:
             break
         try:
             freed += os.path.getsize(path)
             os.remove(path)
-            removed += 1
         except OSError:
             continue
-    if removed:
-        log("очередь переполнена, удалено самых старых кадров: %d" % removed)
-    return removed
 
 
-def remember_frame(body):
+def remember(body, frame_no):
     try:
-        os.makedirs(QUEUE_DIR, exist_ok=True)
-        os.chmod(QUEUE_DIR, 0o700)
-    except OSError:
-        return
-
-    files = queue_files()
-    size = queue_size(files)
-    if size + len(body) > QUEUE_LIMIT:
-        drop_oldest(files, size + len(body) - QUEUE_LIMIT)
-    if free_bytes() < QUEUE_MIN_FREE:
-        drop_oldest(queue_files(), QUEUE_MIN_FREE)
-
-    name = "%d-%06d.frame" % (int(time.time() * 1000), os.getpid() % 1000000)
-    path = os.path.join(QUEUE_DIR, name)
-    try:
-        out = open(path + ".new", "wb")
-        out.write(body)
-        out.close()
-        os.chmod(path + ".new", 0o600)
+        os.makedirs(QUEUE_DIR, mode=0o700, exist_ok=True)
+        files = queue_files()
+        size = sum(os.path.getsize(path) for path in files if os.path.exists(path))
+        free = shutil.disk_usage(QUEUE_DIR).free
+        needed = max(size + len(body) - QUEUE_LIMIT, QUEUE_MIN_FREE + len(body) - free)
+        if needed > 0:
+            drop_oldest(files, needed)
+        path = os.path.join(QUEUE_DIR, "%013d.frame" % frame_no)
+        with open(path + ".new", "wb") as output:
+            output.write(body)
         os.replace(path + ".new", path)
+        return needed <= 0
     except OSError:
-        pass
+        return False
 
 
-def flush_queue():
-    sent = 0
-    for path in queue_files()[:QUEUE_SEND_PER_CYCLE]:
-        try:
-            body = open(path, "rb").read()
-        except OSError:
-            continue
-        try:
-            post_body(body)
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
-            return sent
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-        sent += 1
-    return sent
+class Senders:
 
+    def __init__(self):
+        self.interval = 0
+        self.last_reply = 0.0
+        self.live_frame = None
+        self.live_ready = threading.Condition()
+        self.archive_ready = threading.Event()
 
-def send(stream, login, keyframe, pieces):
-    body = json.dumps(stream.header(login, keyframe, pieces)).encode() + b"\n"
-    for run, blob in pieces:
-        body += blob
+    def publish_live(self, body):
+        with self.live_ready:
+            self.live_frame = body
+            self.live_ready.notify()
 
-    try:
-        return post_body(body)
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
-        if stream.kind == "store":
-            remember_frame(body)
-        return None
+    def clear_live(self):
+        with self.live_ready:
+            self.live_frame = None
+
+    def post(self, body):
+        answer = post_body(body)
+        self.interval = int(answer.get("interval", 0))
+        self.last_reply = time.monotonic()
+
+    def live_loop(self):
+        while True:
+            with self.live_ready:
+                self.live_ready.wait_for(lambda: self.live_frame is not None)
+                body = self.live_frame
+                self.live_frame = None
+            try:
+                self.post(body)
+            except (OSError, ValueError):
+                pass
+
+    def archive_loop(self):
+        while True:
+            self.archive_ready.wait(timeout=2)
+            self.archive_ready.clear()
+            files = queue_files()
+            for path in files:
+                try:
+                    with open(path, "rb") as source:
+                        body = source.read()
+                except OSError:
+                    continue
+                try:
+                    self.post(body)
+                except (OSError, ValueError):
+                    time.sleep(2)
+                    break
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
 
 
 def main():
     if not URL or not COMPUTER:
+        log("компьютер не на учёте, запись ждёт")
+        time.sleep(300)
         return 0
 
     os.makedirs(WORK_DIR, exist_ok=True)
-    os.chmod(WORK_DIR, 0o700)
+    os.chmod(WORK_DIR, 0o711)
     log("запись экрана запущена")
 
-    live = Stream("live", LIVE_WIDTH, LIVE_HEIGHT, LIVE_RAW)
-    store = Stream("store", STORE_WIDTH, STORE_HEIGHT, STORE_RAW)
-
-    watched = 0
+    live = Stream("live", LIVE_SIZE)
+    store = Stream("store", STORE_SIZE)
+    senders = Senders()
+    threading.Thread(target=senders.live_loop, daemon=True).start()
+    threading.Thread(target=senders.archive_loop, daemon=True).start()
     next_store = 0.0
-    last_login = ""
+    last_key = ""
+    ready_at = 0
     misses = 0
 
     while True:
         started = time.time()
-        login, hint = active_session()
-
-        if not login:
-            if not ALWAYS:
-                store.reset()
-                time.sleep(STORE_INTERVAL)
-                continue
-            login = GREETER_LOGIN
-
-        if is_admin(login):
-            store.reset()
-            live.reset()
-            last_login = login
-            time.sleep(STORE_INTERVAL)
+        session = de_common.screen_session()
+        if session is None:
+            senders.clear_live()
+            last_key = ""
+            time.sleep(1)
             continue
 
-        if login != last_login:
-            store.reset()
-            live.reset()
-            last_login = login
+        login = session.get("Name", "")
+        if session.get("Class") == "greeter":
+            login = de_common.GREETER
 
-        if SKIP_BREAKS and not watched and not de_time.lesson_now()[0]:
+        key = session.get("Id", "") + "/" + login
+        if key != last_key:
+            senders.clear_live()
             store.reset()
-            time.sleep(STORE_INTERVAL)
-            continue
-
-        try:
-            raw = grab(login, hint)
+            next_store = 0.0
+            last_key = key
+            ready_at = time.monotonic() + 0.5
             misses = 0
-        except (subprocess.CalledProcessError, OSError):
+        if time.monotonic() < ready_at:
+            time.sleep(0.5)
+            continue
+
+        picture = grab(session)
+        if picture is None:
             misses += 1
             if misses in (10, 100, 1000):
-                log("экран не снимается %d раз подряд, сеанс %s (%s)"
-                    % (misses, login, SESSION_KIND["type"] or "неизвестно"))
-            time.sleep(STORE_INTERVAL)
+                log("экран не снимается %d раз подряд, сеанс %s %s" % (misses, login, session.get("Type", "")))
+            time.sleep(1)
             continue
+        active = de_common.screen_session()
+        if active is None or active.get("Id") != session.get("Id"):
+            continue
+        misses = 0
 
-        answer = None
-
+        local_mode = read_mode()
+        remote_mode = senders.interval if time.monotonic() - senders.last_reply < 6 else 0
+        watched = local_mode or remote_mode
         if watched:
-            try:
-                live.make_palette()
-                pieces = [[(-1, 0, 0), live.encode_full()]]
-                answer = send(live, login, True, pieces)
-                live.frame_no += 1
-            except (subprocess.CalledProcessError, OSError, ValueError):
-                pass
+            senders.publish_live(live.body(login, True, [[(-1, 0, 0), webp(picture)]]))
+            live.frame_no += 1
 
         if started >= next_store:
             next_store = started + STORE_INTERVAL
-            try:
-                if watched:
-                    if store.width != LIVE_WIDTH:
-                        store.resize(LIVE_WIDTH, LIVE_HEIGHT)
-                    store.raw = LIVE_RAW
-                    frame = raw
-                else:
-                    if store.width != STORE_WIDTH:
-                        store.resize(STORE_WIDTH, STORE_HEIGHT)
-                    store.raw = STORE_RAW
-                    frame = shrink()
-                current, keyframe, pieces = store.build(frame)
-                if pieces:
-                    reply = send(store, login, keyframe, pieces)
+            current, keyframe, pieces = store.build(picture.resize(STORE_SIZE, Image.BILINEAR))
+            if pieces:
+                stored_without_loss = remember(store.body(login, keyframe, pieces), store.frame_no)
+                senders.archive_ready.set()
+                store.frame_no += 1
+                if stored_without_loss:
                     store.previous = current
-                    store.frame_no += 1
                     store.since_key = 0 if keyframe else store.since_key + 1
-                    if reply is not None:
-                        answer = reply
-            except (subprocess.CalledProcessError, OSError, ValueError):
-                store.reset()
-
-        if answer is not None:
-            flush_queue()
-
-        watched = read_mode()
-        if answer is not None and not watched:
-            watched = int(answer.get("interval") or 0)
+                else:
+                    store.reset()
 
         if watched == 1:
-            interval = LIVE_INTERVAL
+            pause = 1 if session.get("Type") == "wayland" else LIVE_INTERVAL
         elif watched:
-            interval = WATCH_INTERVAL
+            pause = WATCH_INTERVAL
         else:
-            interval = STORE_INTERVAL
-
-        rest = interval - (time.time() - started)
+            pause = STORE_INTERVAL
+        rest = pause - (time.time() - started)
         if rest > 0:
             time.sleep(rest)
 
 
-sys.exit(main())
+if __name__ == "__main__":
+    sys.exit(main())

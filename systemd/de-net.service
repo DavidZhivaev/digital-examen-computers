@@ -1,0 +1,14 @@
+[Unit]
+Description=Digital Examen network policy
+After=de-traffic.service network-online.target
+Wants=de-traffic.service
+
+[Service]
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/sbin/de-net
+ExecStopPost=/usr/local/sbin/de-net down
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

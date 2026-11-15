@@ -1,0 +1,555 @@
+#!/usr/bin/python3
+
+import ipaddress
+import json
+import os
+import pwd
+import socket
+import socketserver
+import struct
+import subprocess
+import sys
+from urllib.parse import urlsplit
+import threading
+import time
+import urllib.request
+
+sys.path.insert(0, "/usr/local/lib/digital-examen")
+
+import de_common
+import de_patterns
+
+PROXY_PORT = 3129
+DNS_PORT = 5399
+TABLE = "de_agent"
+RELAY_MARK = 0x44450000
+POLICY_FILE = os.path.join(de_common.STATE_DIR, "policy.json")
+TRAFFIC_SOCKET = os.path.join(de_common.RUN_DIR, "traffic.sock")
+AI_URL = de_common.setting("DE_API_URL", "").rstrip("/") + "/api/computers/device/ai"
+SEEN_SECONDS = 300
+PEOPLE_EVERY = 30
+
+SEEN = {}
+TOLD = {}
+AI_CACHE = {}
+POLICY = {"stamp": 0, "data": {}}
+LOCK = threading.Lock()
+PEOPLE = set()
+
+BLOCKED_BODY = (
+    "<html><head><meta charset=\"utf-8\"><title>Закрыто</title></head>"
+    "<body style=\"font-family:sans-serif;text-align:center;margin-top:20vh\">"
+    "<h1>Сайт закрыт ограничениями школы</h1></body></html>"
+).encode("utf-8")
+BLOCKED = (
+    b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/html; charset=utf-8\r\n"
+    b"Content-Length: " + str(len(BLOCKED_BODY)).encode() + b"\r\nConnection: close\r\n\r\n"
+    + BLOCKED_BODY
+)
+
+
+def log(message):
+    de_common.log("de-net", message)
+
+
+def nft(script):
+    process = subprocess.run(["nft", "-f", "-"], input=script.encode(),
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if process.returncode != 0:
+        log("nft: " + process.stdout.decode("utf-8", "replace").strip()[:300])
+    return process.returncode == 0
+
+
+def rules_up():
+    rules_down()
+    return nft("""
+table inet %(table)s {
+    set people {
+        type uid
+    }
+    chain nat_out {
+        type nat hook output priority -100; policy accept;
+        meta skuid @people ip daddr != 127.0.0.0/8 tcp dport { 80, 443 } redirect to :%(proxy)d
+        meta skuid @people ip6 daddr != ::1 tcp dport { 80, 443 } redirect to :%(proxy)d
+        meta skuid @people meta nfproto ipv4 udp dport 53 redirect to :%(dns)d
+        meta skuid @people meta nfproto ipv6 udp dport 53 redirect to :%(dns)d
+    }
+    chain filter_out {
+        type filter hook output priority 0; policy accept;
+        meta skuid != @people accept
+        oifname "lo" accept
+        meta l4proto tcp reject with tcp reset
+        reject
+    }
+}
+""" % {"table": TABLE, "proxy": PROXY_PORT, "dns": DNS_PORT})
+
+
+def relay_exception(enable):
+    match = ["-m", "owner", "--uid-owner", "0", "-m", "mark", "--mark",
+             hex(RELAY_MARK), "-p", "tcp", "-m", "multiport", "--dports", "80,443",
+             "-m", "comment", "--comment", "Digital Examen web relay", "-j", "ACCEPT"]
+    for tool in ("iptables", "ip6tables"):
+        try:
+            def rule(action, *args):
+                result = subprocess.run([tool, "-w", "2", action, "OUTPUT", *args, *match],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return result.returncode == 0
+            present = rule("-C")
+            if enable and not present:
+                rule("-I", "1")
+            elif not enable and present:
+                rule("-D")
+        except FileNotFoundError:
+            continue
+
+
+def rules_down():
+    subprocess.call(["nft", "delete", "table", "inet", TABLE],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def update_people():
+    global PEOPLE
+    current = {entry.pw_uid for entry in de_common.people()}
+    if current == PEOPLE:
+        return True
+    script = "flush set inet %s people\n" % TABLE
+    if current:
+        script += "add element inet %s people { %s }\n" % (TABLE, ", ".join(map(str, sorted(current))))
+    if not nft(script):
+        return False
+    PEOPLE = current
+    log("ограничения действуют для UID: " + (", ".join(map(str, sorted(current))) or "никого"))
+    return True
+
+
+def people_loop():
+    while True:
+        time.sleep(PEOPLE_EVERY)
+        relay_exception(True)
+        try:
+            update_people()
+        except Exception as error:
+            log("список людей не собран: %s" % error)
+
+
+def policy():
+    try:
+        stamp = os.path.getmtime(POLICY_FILE)
+    except OSError:
+        return {}
+    if stamp != POLICY["stamp"]:
+        try:
+            POLICY["data"] = json.loads(open(POLICY_FILE).read())
+        except (IOError, ValueError):
+            POLICY["data"] = {}
+        POLICY["stamp"] = stamp
+    return POLICY["data"]
+
+
+def ask_ai(host):
+    with LOCK:
+        known = AI_CACHE.get(host)
+    if known and time.time() - known[1] < 3600:
+        return known[0]
+    answer = False
+    try:
+        request = urllib.request.Request(AI_URL, data=json.dumps({"host": host}).encode())
+        request.add_header("Content-Type", "application/json")
+        request.add_header("X-De-Computer", de_common.computer())
+        request.add_header("X-De-Secret", de_common.secret("proxy"))
+        reply = json.loads(urllib.request.urlopen(request, timeout=2).read().decode("utf-8"))
+        answer = bool(reply.get("ai"))
+    except (OSError, ValueError):
+        return False
+    with LOCK:
+        AI_CACHE[host] = (answer, time.time())
+    return answer
+
+
+def decide(host):
+    groups = sorted(policy().get("groups", []), key=lambda item: -int(item.get("priority", 50)))
+    for group in groups:
+        name = group.get("name", "")
+        if de_patterns.any_match(group.get("always_allow"), host):
+            return "pass", name
+        if group.get("principle") == "allow":
+            return "block", name
+        if de_patterns.any_match(group.get("denied"), host):
+            return "block", name
+        if group.get("ai_auto") and ask_ai(host):
+            return "block", name
+    return "pass", ""
+
+
+def note(kind, value, login):
+    record = {"kind": kind, "value": value, "at": int(time.time()), "login": login}
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        client.sendto(json.dumps(record).encode(), TRAFFIC_SOCKET)
+        client.close()
+    except OSError:
+        pass
+
+
+def note_visit(host, login):
+    key = login + "|" + host
+    now = time.time()
+    with LOCK:
+        if now - SEEN.get(key, 0) < SEEN_SECONDS:
+            return
+        SEEN[key] = now
+        if len(SEEN) > 20000:
+            SEEN.clear()
+    note("site", host, login)
+
+
+def note_block(host, login, group):
+    key = login + "|" + host
+    now = time.time()
+    with LOCK:
+        if now - TOLD.get(key, 0) < 60:
+            return
+        TOLD[key] = now
+    note("block", host + " - " + group if group else host, login)
+
+
+def owner_of(address):
+    ip, port = address[:2]
+    family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+    packed = socket.inet_pton(family, ip)
+    hex_ip = "".join("%08X" % word for word in struct.unpack("=%dI" % (len(packed) // 4), packed))
+    wanted = "%s:%04X" % (hex_ip, port)
+    path = "/proc/net/tcp6" if family == socket.AF_INET6 else "/proc/net/tcp"
+    try:
+        with open(path) as entries:
+            for line in entries:
+                fields = line.split()
+                if len(fields) < 8 or fields[1] != wanted:
+                    continue
+                try:
+                    uid = int(fields[7])
+                    if uid in PEOPLE:
+                        return pwd.getpwuid(uid).pw_name
+                    return ""
+                except (KeyError, ValueError):
+                    return fields[7]
+    except OSError:
+        pass
+    return ""
+
+
+def original_target(client):
+    if client.family == socket.AF_INET6:
+        data = client.getsockopt(socket.IPPROTO_IPV6, 80, 28)
+        ip = socket.inet_ntop(socket.AF_INET6, data[8:24])
+    else:
+        data = client.getsockopt(socket.SOL_IP, 80, 16)
+        ip = socket.inet_ntop(socket.AF_INET, data[4:8])
+    port = struct.unpack("!H", data[2:4])[0]
+    return ip, port
+
+
+def read_hello(client):
+    data = b""
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            chunk = client.recv(16384)
+        except socket.timeout:
+            break
+        if not chunk:
+            break
+        data += chunk
+        if data[:1] == b"\x16":
+            if len(data) >= 5 and len(data) >= 5 + struct.unpack("!H", data[3:5])[0]:
+                break
+        elif b"\r\n\r\n" in data:
+            break
+        if len(data) > 65536:
+            break
+    return data
+
+
+def sni_of(data):
+    try:
+        if data[0] != 0x16 or data[5] != 0x01:
+            return ""
+        place = 9 + 2 + 32
+        place += 1 + data[place]
+        place += 2 + struct.unpack("!H", data[place:place + 2])[0]
+        place += 1 + data[place]
+        end = place + 2 + struct.unpack("!H", data[place:place + 2])[0]
+        place += 2
+        while place + 4 <= end:
+            kind, size = struct.unpack("!HH", data[place:place + 4])
+            place += 4
+            if kind == 0:
+                length = struct.unpack("!H", data[place + 3:place + 5])[0]
+                return data[place + 5:place + 5 + length].decode("ascii", "replace").lower()
+            place += size
+    except (IndexError, struct.error):
+        return ""
+    return ""
+
+
+def host_of(data):
+    try:
+        head = data.split(b"\r\n\r\n", 1)[0].decode("latin-1")
+    except UnicodeDecodeError:
+        return ""
+    for line in head.split("\r\n")[1:]:
+        if line.lower().startswith("host:"):
+            value = line.split(":", 1)[1].strip().lower()
+            if value.startswith("["):
+                return value[1:].split("]", 1)[0]
+            return value.split(":", 1)[0]
+    return ""
+
+
+def pipe(source, target):
+    try:
+        while True:
+            chunk = source.recv(65536)
+            if not chunk:
+                break
+            target.sendall(chunk)
+    except OSError:
+        pass
+    try:
+        target.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+
+
+def proxy_target(data):
+    request, separator, remainder = data.partition(b"\r\n")
+    method, target, version = request.decode("ascii").split()
+    tunnel = method == "CONNECT"
+    address = urlsplit("//" + target if tunnel else target)
+    if not tunnel and address.scheme != "http":
+        return None
+    port = address.port or (443 if tunnel else 80)
+    if port != (443 if tunnel else 80) or not address.hostname or address.username or address.password:
+        raise ValueError("неподдерживаемый адрес прокси")
+    payload = remainder.partition(b"\r\n\r\n")[2]
+    if not tunnel:
+        lines = remainder.split(b"\r\n")
+        for index, line in enumerate(lines):
+            if not line:
+                headers = [item for item in lines[:index] if not item.lower().startswith(b"proxy-")]
+                path = (address.path or "/") + ("?" + address.query if address.query else "")
+                payload = (f"{method} {path} {version}".encode("ascii") + separator
+                           + b"\r\n".join(headers + lines[index:]))
+                break
+    return address.hostname, port, payload, tunnel
+
+
+def connect_web(host, port, public_only):
+    for family, kind, protocol, _, address in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+        if public_only and not ipaddress.ip_address(address[0]).is_global:
+            continue
+        upstream = socket.socket(family, kind, protocol)
+        try:
+            upstream.settimeout(10)
+            upstream.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, RELAY_MARK)
+            upstream.connect(address)
+            return upstream
+        except OSError:
+            upstream.close()
+    raise OSError("сайт недоступен")
+
+
+class Handler(socketserver.BaseRequestHandler):
+
+    def handle(self):
+        client = self.request
+        try:
+            ip, port = original_target(client)
+        except OSError:
+            return
+        login = owner_of(self.client_address)
+        if not login:
+            return
+        client.settimeout(5)
+        data = read_hello(client)
+        if not data:
+            return
+
+        secure = data[:1] == b"\x16"
+        try:
+            proxy = None if secure else proxy_target(data)
+        except (UnicodeError, ValueError):
+            return
+        if proxy:
+            host, port, data, tunnel = proxy
+            ip = host
+        else:
+            host = sni_of(data) if secure else host_of(data)
+            tunnel = False
+        if not host:
+            host = ip
+
+        verdict, group = decide(host)
+        if verdict == "block":
+            note_block(host, login, group)
+            if not secure:
+                try:
+                    client.sendall(BLOCKED)
+                except OSError:
+                    pass
+            return
+
+        if tunnel:
+            try:
+                client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                data = data or read_hello(client)
+            except OSError:
+                return
+            if sni_of(data).rstrip(".") != host.rstrip("."):
+                return
+        try:
+            upstream = connect_web(ip, port, proxy is not None)
+        except OSError:
+            return
+        client.settimeout(None)
+        upstream.settimeout(None)
+        try:
+            if data:
+                upstream.sendall(data)
+            note_visit(host, login)
+        except OSError:
+            upstream.close()
+            return
+        other = threading.Thread(target=pipe, args=(client, upstream), daemon=True)
+        other.start()
+        pipe(upstream, client)
+        other.join(timeout=5)
+        upstream.close()
+
+
+class Server(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+class IPv6Server(Server):
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        super().server_bind()
+
+
+def upstream_dns():
+    try:
+        for line in open("/etc/resolv.conf"):
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == "nameserver":
+                try:
+                    return ipaddress.ip_address(parts[1])
+                except ValueError:
+                    continue
+    except IOError:
+        pass
+    return ipaddress.ip_address("127.0.0.53")
+
+
+def question_end(packet):
+    place = 12
+    while place < len(packet):
+        size = packet[place]
+        if size == 0:
+            break
+        place += 1 + size
+    return place + 5
+
+
+def question_type(packet):
+    end = question_end(packet)
+    if end > len(packet):
+        return 0
+    return struct.unpack("!H", packet[end - 4:end - 2])[0]
+
+
+def empty_answer(packet):
+    flags = struct.unpack("!H", packet[2:4])[0]
+    flags = 0x8000 | (flags & 0x7900) | 0x0080
+    return packet[:2] + struct.pack("!HHHHH", flags, 1, 0, 0, 0) + packet[12:question_end(packet)]
+
+
+def answer_dns(server, packet, sender):
+    if len(packet) < 12:
+        return
+    if question_type(packet) in (64, 65):
+        server.sendto(empty_answer(packet), sender)
+        return
+    upstream = upstream_dns()
+    family = socket.AF_INET6 if upstream.version == 6 else socket.AF_INET
+    outside = socket.socket(family, socket.SOCK_DGRAM)
+    outside.settimeout(4)
+    try:
+        outside.sendto(packet, (str(upstream), 53))
+        reply = outside.recv(65535)
+        server.sendto(reply, sender)
+    except OSError:
+        pass
+    finally:
+        outside.close()
+
+
+def dns_listener(family, host):
+    server = socket.socket(family, socket.SOCK_DGRAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if family == socket.AF_INET6:
+        server.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+    server.bind((host, DNS_PORT))
+    return server
+
+
+def dns_loop(server):
+    while True:
+        try:
+            packet, sender = server.recvfrom(65535)
+        except OSError:
+            continue
+        threading.Thread(target=answer_dns, args=(server, packet, sender), daemon=True).start()
+
+
+def main():
+    if os.geteuid() != 0:
+        sys.stderr.write("Запускать от root.\n")
+        return 1
+    if sys.argv[1:] == ["down"]:
+        rules_down()
+        relay_exception(False)
+        return 0
+
+    server = Server(("127.0.0.1", PROXY_PORT), Handler)
+    ipv4_dns = dns_listener(socket.AF_INET, "127.0.0.1")
+    threading.Thread(target=dns_loop, args=(ipv4_dns,), daemon=True).start()
+    try:
+        ipv6 = IPv6Server(("::1", PROXY_PORT), Handler)
+        ipv6_dns = dns_listener(socket.AF_INET6, "::1")
+    except OSError as error:
+        log("IPv6 недоступен: %s" % error)
+    else:
+        threading.Thread(target=ipv6.serve_forever, daemon=True).start()
+        threading.Thread(target=dns_loop, args=(ipv6_dns,), daemon=True).start()
+    relay_exception(True)
+    if not rules_up() or not update_people():
+        log("правила сети не поставились")
+        return 1
+    threading.Thread(target=people_loop, daemon=True).start()
+    log("ограничения сети запущены")
+    try:
+        server.serve_forever()
+    finally:
+        rules_down()
+        relay_exception(False)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -4,47 +4,20 @@ import json
 import os
 import socket
 import ssl
-import subprocess
-import time
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 sys.path.insert(0, "/usr/local/lib/digital-examen")
 
+import de_common
 import de_keys
 
-CONFIG_FILE = "/etc/digital-examen/computers.conf"
-
-
-def read_config():
-    values = {}
-    if not os.path.exists(CONFIG_FILE):
-        return values
-    data = open(CONFIG_FILE)
-    for line in data:
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        name, value = line.split("=", 1)
-        value = value.strip()
-        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        values[name.strip()] = value
-    data.close()
-    return values
-
-
-CONFIG = read_config()
-API = CONFIG.get("DE_API_URL", "https://ex.1580.ru")
-PROXY_SECRET_FILE = CONFIG.get("DE_PROXY_SECRET_FILE", "/etc/digital-examen/proxy.secret")
-COMMAND_SECRET_FILE = CONFIG.get("DE_COMMAND_SECRET_FILE", "/etc/digital-examen/command.secret")
-SCREEN_SECRET_FILE = CONFIG.get("DE_SCREEN_SECRET_FILE", "/etc/digital-examen/screen.secret")
-VAULT_SECRET_FILE = CONFIG.get("DE_VAULT_SECRET_FILE", "/etc/digital-examen/vault.secret")
-KEY_FILE_NAME = CONFIG.get("DE_KEY_FILE", "de-key.txt")
-KEY_PUBLIC_FILE = CONFIG.get("DE_KEY_PUBLIC_FILE", "/etc/digital-examen/key-public.pem")
-de_keys.PUBLIC_KEY_FILE = KEY_PUBLIC_FILE
+API = de_common.setting("DE_API_URL", "https://ex.1580.ru")
+KEY_NAME = "de-key.txt"
+POLICY_FILE = os.path.join(de_common.STATE_DIR, "policy.json")
 
 
 def say(message):
@@ -60,63 +33,40 @@ def call(path, payload=None, params=None):
     request = urllib.request.Request(url, data=data)
     if data is not None:
         request.add_header("Content-Type", "application/json")
-    context = ssl.create_default_context()
-    answer = urllib.request.urlopen(request, timeout=25, context=context)
+    answer = urllib.request.urlopen(request, timeout=25, context=ssl.create_default_context())
     return json.loads(answer.read().decode("utf-8"))
 
 
 def fetch_public_key():
-    """Открытая часть подписи ключа: по ней проверяем файл на месте.
-
-    Берём её один раз при установке и кладём рядом с настройками. Дальше
-    компьютер отличает настоящий ключ от выдуманного сам, в том числе без
-    интернета.
-    """
-    if os.path.exists(KEY_PUBLIC_FILE):
-        return True
+    if os.path.exists(de_keys.PUBLIC_KEY_FILE):
+        return
     try:
-        answer = call("/api/computers/key/public")
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
-        return False
-    pem = answer.get("public_key", "")
-    if not pem:
-        return False
-    folder = os.path.dirname(KEY_PUBLIC_FILE)
-    if folder:
-        os.makedirs(folder, exist_ok=True)
-    out = open(KEY_PUBLIC_FILE, "w")
-    out.write(pem)
-    out.close()
-    os.chmod(KEY_PUBLIC_FILE, 0o644)
-    return True
+        pem = call("/api/computers/key/public").get("public_key", "")
+    except (OSError, ValueError):
+        return
+    if pem:
+        de_common.write_file(de_keys.PUBLIC_KEY_FILE, pem)
 
 
-def wait_for_key():
-    """Без ключа администратора компьютер на учёт не ставится.
-
-    Ключ лежит файлом в корне флешки, выдаёт его сайт администратору
-    информатики или школы. Внутри файла — подписанный сайтом токен, в
-    котором зашит владелец. Права владельца сайт проверяет заново на каждой
-    установке, поэтому отобранные права закрывают и установку.
-    """
-    say("Вставьте флешку с ключом администратора (файл %s)." % KEY_FILE_NAME)
-    say("Имя со скобками, %s, тоже подойдёт." % "de-key (1).txt")
-    say("Ключ скачивается на сайте: Компьютеры → Скачать ключ.")
-    say("Отмена — Ctrl+C.")
+def read_key():
+    asked = False
     while True:
-        path = de_keys.find_key(KEY_FILE_NAME)
+        path = de_keys.find_key(KEY_NAME)
         if path:
             values = de_keys.parse_key(path)
-            if not values.get("token"):
-                say("Файл ключа найден, но токена в нём нет: %s" % path)
-            elif not values.get("verified"):
-                say("Подпись ключа не сходится, скачайте ключ заново: %s" % path)
-            else:
-                say("Ключ найден: %s" % path)
-                say("Владелец ключа: %s" % values.get("login", ""))
+            if values.get("token") and values.get("verified"):
+                say("Ключ прочитан, владелец: %s" % values.get("login", ""))
                 return values
+            if values.get("token") and not os.path.exists(de_keys.PUBLIC_KEY_FILE):
+                say("Ключ прочитан, подпись проверит сайт")
+                return values
+            say("Ключ на флешке не подходит, скачайте его на сайте заново")
+            return {}
+        if not asked:
+            say("Вставьте флешку с файлом %s (Компьютеры - Скачать ключ). Отмена - Ctrl+C" % KEY_NAME)
+            asked = True
         try:
-            time.sleep(3)
+            time.sleep(2)
         except KeyboardInterrupt:
             return {}
 
@@ -127,32 +77,15 @@ def ask_number(question, low, high):
             raw = input(question + ": ").strip()
         except (EOFError, KeyboardInterrupt):
             return None
-        if not raw.isdigit():
-            say("Нужно число от %d до %d." % (low, high))
-            continue
-        value = int(raw)
-        if low <= value <= high:
-            return value
-        say("Нужно число от %d до %d." % (low, high))
-
-
-def write_secret(path, value):
-    if not value:
-        return
-    folder = os.path.dirname(path)
-    if folder:
-        os.makedirs(folder, exist_ok=True)
-    out = open(path, "w")
-    out.write(value + "\n")
-    out.close()
-    os.chmod(path, 0o600)
-    os.chown(path, 0, 0)
+        if raw.isdigit() and low <= int(raw) <= high:
+            return int(raw)
+        say("Нужно число от %d до %d" % (low, high))
 
 
 def write_config(values):
     lines = []
     seen = set()
-    for line in open(CONFIG_FILE):
+    for line in open(de_common.CONFIG_FILE):
         key = line.split("=", 1)[0].strip()
         if key in values:
             lines.append('%s="%s"\n' % (key, values[key]))
@@ -162,82 +95,63 @@ def write_config(values):
     for key, value in values.items():
         if key not in seen:
             lines.append('%s="%s"\n' % (key, value))
-    out = open(CONFIG_FILE, "w")
-    out.write("".join(lines))
-    out.close()
-    os.chmod(CONFIG_FILE, 0o640)
+    de_common.write_file(de_common.CONFIG_FILE, "".join(lines), 0o640)
+
+
+def choose_place():
+    while True:
+        corpus = ask_number("Номер корпуса", 1, 99)
+        room = ask_number("Номер аудитории", 1, 9999) if corpus else None
+        number = ask_number("Номер компьютера в аудитории", 1, 999) if room else None
+        if number is None:
+            return None
+        name = "%dk-%d-%d" % (corpus, room, number)
+        try:
+            busy = call("/api/computers/device/taken", None,
+                        {"corpus": corpus, "room": room, "number": number})
+        except (OSError, ValueError) as error:
+            say("Сайт не ответил: %s" % error)
+            return None
+        if busy.get("taken") and busy.get("hostname") != socket.gethostname():
+            say("Место %s уже занято машиной %s, выберите другой номер" % (name, busy.get("hostname") or "с другим именем"))
+            continue
+        try:
+            yes = input("Компьютер будет называться %s. Верно? [да/нет]: " % name).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if yes in ("да", "д", "y", "yes", ""):
+            return corpus, room, number, name
 
 
 def main():
     if os.geteuid() != 0:
-        say("Запускать от root.")
+        say("Запускать от root")
         return 1
-
-    if not os.path.exists(CONFIG_FILE):
-        say("Нет %s — сначала отработает setup.sh." % CONFIG_FILE)
+    if not os.path.exists(de_common.CONFIG_FILE):
+        say("Нет %s, сначала setup.sh" % de_common.CONFIG_FILE)
         return 1
 
     fetch_public_key()
-
-    key = wait_for_key()
+    key = read_key()
     if not key:
-        say("Ключ не предъявлен, установка прервана.")
+        say("Ключ не предъявлен, установка прервана")
         return 1
 
-    existing = CONFIG.get("DE_COMPUTER_ID", "")
+    existing = de_common.computer()
     if existing:
-        say("Компьютер уже поставлен на учёт как %s." % existing)
         try:
-            again = input("Переназначить? [нет/да]: ").strip().lower()
+            again = input("Компьютер уже на учёте как %s. Переназначить? [нет/да]: " % existing).strip().lower()
         except (EOFError, KeyboardInterrupt):
             return 0
-        if again not in ("да", "y", "yes", "д"):
+        if again not in ("да", "д", "y", "yes"):
             return 0
 
-    say("")
-    say("Постановка компьютера на учёт в системе «Компьютеры».")
-    say("Сайт: %s" % API)
-    say("")
-
-    while True:
-        corpus = ask_number("Номер корпуса", 1, 99)
-        if corpus is None:
-            say("Отменено.")
-            return 1
-        room = ask_number("Номер аудитории", 1, 9999)
-        if room is None:
-            say("Отменено.")
-            return 1
-        number = ask_number("Номер компьютера в аудитории", 1, 999)
-        if number is None:
-            say("Отменено.")
-            return 1
-
-        name = "%dk-%d-%d" % (corpus, room, number)
-
-        try:
-            busy = call("/api/computers/device/taken", None,
-                        {"corpus": corpus, "room": room, "number": number})
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as error:
-            say("Сайт не ответил: %s" % error)
-            return 1
-
-        if busy.get("taken") and busy.get("hostname") != socket.gethostname():
-            say("")
-            say("Место %s уже занято машиной %s." % (name, busy.get("hostname") or "с другим именем"))
-            say("Выберите другой номер.")
-            say("")
-            continue
-
-        say("")
-        say("Этот компьютер будет называться %s." % name)
-        try:
-            yes = input("Верно? [да/нет]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            return 1
-        if yes in ("да", "y", "yes", "д", ""):
-            break
-        say("")
+    say("Постановка на учёт, сайт %s" % API)
+    place = choose_place()
+    if place is None:
+        say("Отменено")
+        return 1
+    corpus, room, number, name = place
 
     try:
         created = call("/api/computers/device/enroll", {
@@ -249,17 +163,16 @@ def main():
             "computer": name,
         })
     except urllib.error.HTTPError as error:
-        body = error.read().decode("utf-8", "replace")
-        say("Сайт отказал: %s %s" % (error.code, body[:300]))
+        say("Сайт отказал: %s %s" % (error.code, error.read().decode("utf-8", "replace")[:300]))
         return 1
-    except (urllib.error.URLError, OSError, ValueError) as error:
+    except (OSError, ValueError) as error:
         say("Сайт не ответил: %s" % error)
         return 1
 
-    write_secret(PROXY_SECRET_FILE, created.get("proxy_secret", ""))
-    write_secret(COMMAND_SECRET_FILE, created.get("command_secret", ""))
-    write_secret(SCREEN_SECRET_FILE, created.get("screen_secret", ""))
-    write_secret(VAULT_SECRET_FILE, created.get("vault_secret", ""))
+    for kind in ("proxy", "command", "screen"):
+        value = created.get(kind + "_secret", "")
+        if value:
+            de_common.write_file("/etc/digital-examen/%s.secret" % kind, value + "\n", 0o600)
 
     write_config({
         "DE_COMPUTER_ID": created.get("computer", name),
@@ -270,21 +183,10 @@ def main():
         "DE_SCREEN_URL": created.get("screen_url", "https://ex.1580.ru/screens"),
     })
 
-    policy = created.get("policy")
-    if policy:
-        os.makedirs("/run/digital-examen", exist_ok=True)
-        out = open(CONFIG.get("DE_POLICY_FILE", "/run/digital-examen/policy.json"), "w")
-        out.write(json.dumps(policy))
-        out.close()
+    if created.get("policy"):
+        de_common.write_file(POLICY_FILE, json.dumps(created["policy"], sort_keys=True))
 
-    say("Беру выгрузку учёток для входа без интернета.")
-    code = subprocess.call(["/usr/local/sbin/de-vault", "sync"])
-    if code != 0:
-        say("Выгрузка не получена, вход без интернета пока не работает.")
-        say("Проверить потом: de-vault sync, затем de-vault show.")
-
-    say("")
-    say("Готово. Компьютер зарегистрирован как %s." % created.get("computer", name))
+    say("Готово, компьютер на учёте как %s" % created.get("computer", name))
     return 0
 
 

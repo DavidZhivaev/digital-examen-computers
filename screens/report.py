@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+import fcntl
 import json
 import os
 import sys
@@ -80,7 +81,7 @@ def send_record(computer, folder):
         return
     try:
         record = json.loads(open(path).read())
-    except ValueError:
+    except (OSError, ValueError):
         return
 
     payload = {
@@ -103,10 +104,17 @@ def send_record(computer, folder):
     if identifier is None or str(record.get("id", "")) == str(identifier):
         return
 
-    record["id"] = identifier
-    out = open(path, "w")
-    out.write(json.dumps(record))
-    out.close()
+    with open(os.path.join(folder, ".record.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            with open(path) as source:
+                latest = json.load(source)
+        except (OSError, ValueError):
+            return
+        latest["id"] = identifier
+        with open(path + ".new", "w") as output:
+            json.dump(latest, output)
+        os.replace(path + ".new", path)
 
 
 def send_seen():
@@ -132,22 +140,6 @@ def send_seen():
         pass
 
 
-def ask_offline_refresh():
-    """Попросить сайт досчитать значения для входа без интернета.
-
-    Считает их сайт - у него лежат bcrypt-хеши, и одна строка стоит около
-    секунды процессорного времени. Поэтому работа идёт порциями, и просим мы
-    её отсюда: приёмник и так ходит к сайту со своим серверным секретом.
-    """
-    limit = int(os.environ.get("DE_OFFLINE_REFRESH_LIMIT", "100"))
-    if limit <= 0:
-        return
-    try:
-        post("/api/computers/device/offline/refresh", {"limit": limit})
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as error:
-        sys.stdout.write("пересчёт офлайн-значений не запустился: %s\n" % error)
-
-
 def main():
     if not API_URL:
         return 0
@@ -155,7 +147,6 @@ def main():
     send_seen()
     for computer, folder in walk_records():
         send_record(computer, folder)
-    ask_offline_refresh()
     return 0
 
 

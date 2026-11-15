@@ -56,24 +56,43 @@ def head():
     return out if code == 0 else ""
 
 
+def installation_exists():
+    try:
+        with open("/var/lib/digital-examen/installed-files") as manifest:
+            paths = manifest.read().splitlines()
+    except OSError:
+        return False
+    return bool(paths) and all(os.path.isfile(path) for path in paths)
+
+
 def main():
     if not os.path.isdir(os.path.join(REPO_DIR, ".git")):
         return 0
 
-    before = head()
+    applied_file = "/var/lib/digital-examen/installed-revision"
+    try:
+        with open(applied_file) as source:
+            before = source.read().strip()
+    except OSError:
+        before = ""
 
     code, out = run(["git", "fetch", "--quiet", "origin", BRANCH])
     if code != 0:
         log("fetch не прошёл: " + out[:200])
         return 0
 
-    code, out = run(["git", "reset", "--hard", "--quiet", "origin/" + BRANCH])
+    code, out = run(["git", "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"])
+    if code != 0:
+        log("полученная ветка не продолжает установленную версию")
+        return 0
+
+    code, out = run(["git", "reset", "--hard", "--quiet", "FETCH_HEAD"])
     if code != 0:
         log("reset не прошёл: " + out[:200])
         return 0
 
     after = head()
-    if after == before:
+    if not after or (after == before and installation_exists()):
         return 0
 
     log("обновление %s -> %s, переустанавливаю" % (before[:8], after[:8]))
@@ -91,6 +110,9 @@ def main():
         log("переустановка вернула код %d" % done.returncode)
         return 0
 
+    with open(applied_file + ".new", "w") as output:
+        output.write(after + "\n")
+    os.replace(applied_file + ".new", applied_file)
     log("обновление применено")
     return 0
 

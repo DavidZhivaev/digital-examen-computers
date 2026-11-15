@@ -2,9 +2,9 @@
 Description=Digital Examen проверка обновлений
 
 [Timer]
-OnBootSec=3min
+OnBootSec=20s
 OnUnitActiveSec=15min
-RandomizedDelaySec=3min
+RandomizedDelaySec=10s
 Persistent=true
 
 [Install]

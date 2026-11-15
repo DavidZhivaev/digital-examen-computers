@@ -3,18 +3,16 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 
-MEDIA_DIRS = ("/run/media", "/media", "/mnt")
 
 PUBLIC_KEY_FILE = "/etc/digital-examen/key-public.pem"
+SAVED_KEY = "/run/digital-examen/de-key.txt"
 
 
 def name_matches(filename, wanted):
-    """Подходит ли имя файла под имя ключа.
-
-    Браузер при повторном скачивании кладёт рядом `de-key (1).txt`, поэтому
-    скобка с номером считается тем же именем. Регистр не важен.
-    """
     stem, dot, ext = wanted.rpartition(".")
     if not dot:
         stem, ext = wanted, ""
@@ -35,7 +33,7 @@ def find_in(folder, wanted):
         if not name_matches(name, wanted):
             continue
         path = os.path.join(folder, name)
-        if os.path.isfile(path):
+        if not os.path.islink(path) and os.path.isfile(path) and os.path.getsize(path) <= 65536:
             found.append(path)
     if not found:
         return ""
@@ -43,33 +41,60 @@ def find_in(folder, wanted):
     return found[0]
 
 
-def find_key(name="de-key.txt"):
-    for base in MEDIA_DIRS:
-        if not os.path.isdir(base):
+def usb_partitions():
+    try:
+        output = subprocess.check_output(
+            ["lsblk", "-J", "-o", "PATH,TRAN,MOUNTPOINT,FSTYPE,TYPE"],
+            stderr=subprocess.DEVNULL, timeout=10)
+        tree = json.loads(output.decode("utf-8", "replace"))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    out = []
+    for disk in tree.get("blockdevices", []):
+        if disk.get("type") != "disk":
             continue
-        try:
-            tops = sorted(os.listdir(base))
-        except OSError:
+        if disk.get("tran") != "usb":
             continue
-        for first in tops:
-            top = os.path.join(base, first)
-            if not os.path.isdir(top):
+        parts = disk.get("children") or [disk]
+        for part in parts:
+            if part.get("fstype"):
+                out.append(part)
+    return out
+
+
+def find_on_usb(name):
+    for part in usb_partitions():
+        if part.get("mountpoint"):
+            found = find_in(part["mountpoint"], name)
+            if found and (saved := save_key(found)):
+                return saved
+            continue
+        with tempfile.TemporaryDirectory(prefix="de-usb-") as place:
+            if subprocess.call(["mount", "-o", "ro,nosuid,nodev,noexec", part["path"], place],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
                 continue
-            found = find_in(top, name)
-            if found:
-                return found
             try:
-                inner = sorted(os.listdir(top))
-            except OSError:
-                continue
-            for second in inner:
-                deeper = os.path.join(top, second)
-                if not os.path.isdir(deeper):
-                    continue
-                found = find_in(deeper, name)
-                if found:
-                    return found
+                found = find_in(place, name)
+                if found and (saved := save_key(found)):
+                    return saved
+            finally:
+                subprocess.run(["umount", place], check=True)
     return ""
+
+
+def save_key(path):
+    if not read_token(path):
+        return ""
+    os.makedirs(os.path.dirname(SAVED_KEY), mode=0o755, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=os.path.dirname(SAVED_KEY), delete=False) as output:
+        with open(path, "rb") as source:
+            shutil.copyfileobj(source, output, 8192)
+    os.replace(output.name, SAVED_KEY)
+    return SAVED_KEY
+
+
+def find_key(name="de-key.txt"):
+    return find_on_usb(name)
 
 
 def looks_like_token(line):
@@ -78,11 +103,6 @@ def looks_like_token(line):
 
 
 def read_token(path):
-    """Токен ключа из файла.
-
-    В файле лежит JWT одной строкой, вокруг него комментарии. Формат
-    `token=...` тоже понимаем - так удобнее читать файл глазами.
-    """
     try:
         data = open(path).read()
     except IOError:
@@ -152,11 +172,6 @@ def der_read(data, start):
 
 
 def rsa_numbers(pem):
-    """Модуль и экспонента из открытого ключа в формате SubjectPublicKeyInfo.
-
-    Разбираем вручную, чтобы на школьном компьютере не требовался
-    сторонний пакет: проверка подписи нужна и тогда, когда интернета нет.
-    """
     der = der_from_pem(pem)
     if not der:
         return 0, 0
@@ -175,11 +190,6 @@ def rsa_numbers(pem):
 
 
 def check_signature(token, pem):
-    """Проверить подпись RS256 своими силами.
-
-    PKCS#1 v1.5: возводим подпись в открытую экспоненту и сравниваем с
-    заранее известной обёрткой вокруг sha256 от подписанной части.
-    """
     parts = token.split(".")
     if len(parts) != 3:
         return False
@@ -211,11 +221,6 @@ def check_signature(token, pem):
 
 
 def verify(token, pem=None, issuer="digital-examen", audience="digital-examen-computers"):
-    """Разобранный токен, если подпись сходится. Иначе пустой словарь.
-
-    Срок жизни у ключа не проверяется: его нет. Ключ гаснет на сайте -
-    отзывом, выдачей нового и сменой пароля владельца.
-    """
     if pem is None:
         pem = read_public_key()
     if not pem or not token:
@@ -233,7 +238,6 @@ def verify(token, pem=None, issuer="digital-examen", audience="digital-examen-co
 
 
 def parse_key(path):
-    """Содержимое файла ключа: токен и то, что в нём написано."""
     token = read_token(path)
     if not token:
         return {}
