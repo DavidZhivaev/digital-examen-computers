@@ -54,8 +54,11 @@ def process(uid, data):
             if pending and pending[0] == profile and isinstance(success, bool):
                 pending[2] = success
         READY.notify_all()
-        return {"rules": RULES, "close": [key for key, item in PENDING.items()
-                                         if item[0] == profile and item[1] > now and item[2] is None]}
+        response = {"close": [key for key, item in PENDING.items()
+                              if item[0] == profile and item[1] > now and item[2] is None]}
+        if RULES is not None:
+            response["rules"] = RULES
+        return response
 
 
 def list_tabs():

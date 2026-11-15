@@ -200,7 +200,7 @@ def stats_loop():
         session = de_common.screen_session()
         login = session.get("Name", "") if session and session.get("Class") != "greeter" else ""
         identity = None
-        if login and not de_common.is_admin(login):
+        if login:
             try:
                 identity = (pwd.getpwnam(login).pw_uid, session["Id"])
             except KeyError:
@@ -211,7 +211,7 @@ def stats_loop():
                                       for rule in group.get("tab_titles", [])))
         except (ValueError, TypeError):
             rules = []
-        de_tabs.activate(identity, rules)
+        de_tabs.activate(identity, None if login and de_common.is_admin(login) else rules)
 
         uptime = first_number("/proc/uptime")
         try:
