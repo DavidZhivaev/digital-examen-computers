@@ -207,11 +207,14 @@ def stats_loop():
                 pass
         try:
             policy = json.loads(de_common.read_file(POLICY_FILE) or "{}")
-            rules = list(dict.fromkeys(rule for group in policy.get("groups", [])
-                                      for rule in group.get("tab_titles", [])))
+            groups = policy.get("groups", [])
+            rules = list(dict.fromkeys(rule for group in groups for rule in group.get("tab_titles", [])))
+            url_groups = [{"allow": group.get("url_allow", []), "deny": group.get("url_denied", [])}
+                          for group in groups if group.get("url_allow") or group.get("url_denied")]
         except (ValueError, TypeError):
-            rules = []
-        de_tabs.activate(identity, None if login and de_common.is_admin(login) else rules)
+            rules, url_groups = [], []
+        admin = login and de_common.is_admin(login)
+        de_tabs.activate(identity, None if admin else rules, [] if admin else url_groups)
 
         uptime = first_number("/proc/uptime")
         try:

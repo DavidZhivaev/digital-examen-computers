@@ -5,6 +5,7 @@ import socket
 import struct
 import threading
 import time
+import uuid
 
 SOCKET = "/run/digital-examen/browser-tabs.sock"
 TOKEN = re.compile(r"[0-9a-f]{32}")
@@ -12,18 +13,25 @@ BROWSERS = {"Chromium", "Chrome", "Edge", "Firefox", "Яндекс", "Opera", "B
 READY = threading.Condition()
 SESSION = None
 RULES = []
+URL_GROUPS = []
+URL_JSON = "[]"
+URL_REVISION = uuid.uuid4().hex
 PROFILES = {}
 PENDING = {}
 
 
-def activate(session, rules):
-    global SESSION, RULES
+def activate(session, rules, url_groups):
+    global SESSION, RULES, URL_GROUPS, URL_JSON, URL_REVISION
     with READY:
         if SESSION != session:
             PROFILES.clear()
             PENDING.clear()
         SESSION = session
         RULES = rules
+        if URL_GROUPS != url_groups:
+            URL_GROUPS = url_groups
+            URL_JSON = json.dumps(url_groups, separators=(",", ":"))
+            URL_REVISION = uuid.uuid4().hex
 
 
 def process(uid, data):
@@ -58,6 +66,16 @@ def process(uid, data):
                               if item[0] == profile and item[1] > now and item[2] is None]}
         if RULES is not None:
             response["rules"] = RULES
+        if "url_revision" in data:
+            offset = data.get("url_offset")
+            if data["url_revision"] != URL_REVISION:
+                offset = 0
+            if type(offset) is int and 0 <= offset < len(URL_JSON):
+                end = offset + 16000
+                response["url_policy"] = {
+                    "revision": URL_REVISION, "offset": offset,
+                    "chunk": URL_JSON[offset:end], "complete": end >= len(URL_JSON),
+                }
         return response
 
 
