@@ -24,7 +24,7 @@ PROXY_PORT = 3129
 DNS_PORT = 5399
 TABLE = "de_agent"
 RELAY_MARK = 0x44450000
-RELAY_DIRECT = de_common.setting("DE_NET_RELAY_DIRECT", "0") == "1"
+RELAY_DIRECT = de_common.setting("DE_NET_RELAY_DIRECT", "1") == "1"
 RELAY_RULE = ["pref", "8999", "fwmark", hex(RELAY_MARK) + "/0xffffffff", "lookup", "main"]
 POLICY_FILE = os.path.join(de_common.STATE_DIR, "policy.json")
 TRAFFIC_SOCKET = os.path.join(de_common.RUN_DIR, "traffic.sock")
