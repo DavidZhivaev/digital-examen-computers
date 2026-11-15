@@ -27,11 +27,12 @@ async function sync() {
     const snapshots = await api.tabs.query({})
     const next = new Map()
     for (const tab of snapshots) {
-      if (tab.incognito || !tab.title || !/^https?:/.test(tab.url ?? '')) continue
+      if (!tab.title || !/^https?:/.test(tab.url ?? '')) continue
       if (prohibited(tab.title)) {
         await api.tabs.remove(tab.id).catch(() => {})
         continue
       }
+      if (tab.incognito) continue
       const previous = sessions.get(tab.id)
       const token = previous?.url === tab.url && previous.title === tab.title
         ? previous.token : crypto.randomUUID().replaceAll('-', '')

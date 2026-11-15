@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Digital Examen — вкладки",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "permissions": [
     "tabs",
     "nativeMessaging",
@@ -41,5 +41,6 @@
       ],
       "run_at": "document_start"
     }
-  ]
+  ],
+  "incognito": "spanning"
 }
