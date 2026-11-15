@@ -77,6 +77,10 @@ table inet %(table)s {
     chain filter_out {
         type filter hook output priority 0; policy accept;
         meta skuid != @people accept
+        ip daddr 127.0.0.1 tcp dport %(proxy)d accept
+        ip6 daddr ::1 tcp dport %(proxy)d accept
+        ip daddr 127.0.0.1 udp dport %(dns)d accept
+        ip6 daddr ::1 udp dport %(dns)d accept
         oifname "lo" accept
         meta l4proto tcp reject with tcp reset
         reject
