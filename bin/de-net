@@ -26,7 +26,7 @@ RELAY_MARK = 0x44450000
 POLICY_FILE = os.path.join(de_common.STATE_DIR, "policy.json")
 TRAFFIC_SOCKET = os.path.join(de_common.RUN_DIR, "traffic.sock")
 AI_URL = de_common.setting("DE_API_URL", "").rstrip("/") + "/api/computers/device/ai"
-SEEN_SECONDS = 300
+SEEN_SECONDS = 15
 PEOPLE_EVERY = 30
 
 SEEN = {}

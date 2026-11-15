@@ -536,9 +536,10 @@ class Handler(BaseHTTPRequestHandler):
                     for command in queue:
                         if command.get("name") == "policy":
                             command["policy"] = POLICY.get(computer, {})
-                    self.reply(200, {"commands": queue})
-                    return
-            time.sleep(0.5)
+            if queue:
+                self.reply(200, {"commands": queue})
+                return
+            time.sleep(0.2)
 
         self.reply(200, {"commands": [], "interval": watched_interval(computer)})
 
@@ -611,4 +612,8 @@ def watched_interval(computer):
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(LIVE_DIR, exist_ok=True)
 os.makedirs(STATE_DIR, exist_ok=True)
-ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+class ReceiverServer(ThreadingHTTPServer):
+    request_queue_size = 128
+
+
+ReceiverServer(("0.0.0.0", PORT), Handler).serve_forever()

@@ -94,6 +94,31 @@ def grab_x11(display, xauth):
     return to_image(data)
 
 
+def set_display_scale(session):
+    login = session.get("Name", "")
+    if session.get("Type") != "wayland" or de_common.is_admin(login):
+        return
+    entry = pwd.getpwnam(login)
+    values = de_common.user_env(entry.pw_uid, "WAYLAND_DISPLAY")
+    doctor = shutil.which("kscreen-doctor")
+    if not doctor or not values:
+        return
+    env = de_common.session_env(entry, values)
+    command = ["/usr/bin/setpriv", "--reuid", str(entry.pw_uid), "--regid", str(entry.pw_gid),
+               "--init-groups", doctor]
+    code, output = de_common.run(command + ["-j"], 4, env)
+    if code:
+        return
+    try:
+        outputs = json.loads(output)["outputs"]
+        changes = ["output.%d.scale.1" % item["id"] for item in outputs
+                   if item.get("connected") and item.get("enabled") and item.get("scale", 1) != 1]
+    except (KeyError, TypeError, ValueError):
+        return
+    if changes:
+        de_common.run(command + changes, 4, env)
+
+
 def grab_wayland(login):
     try:
         entry = pwd.getpwnam(login)
@@ -377,21 +402,20 @@ def main():
     threading.Thread(target=senders.archive_loop, daemon=True).start()
     next_store = 0.0
     last_key = ""
+    scale_due = 0
     ready_at = 0
     misses = 0
 
     while True:
         started = time.time()
         session = de_common.screen_session()
-        if session is None:
+        if session is None or session.get("Class") == "greeter":
             senders.clear_live()
             last_key = ""
             time.sleep(1)
             continue
 
         login = session.get("Name", "")
-        if session.get("Class") == "greeter":
-            login = de_common.GREETER
 
         key = session.get("Id", "") + "/" + login
         if key != last_key:
@@ -399,11 +423,16 @@ def main():
             store.reset()
             next_store = 0.0
             last_key = key
+            scale_due = 0
             ready_at = time.monotonic() + 0.5
             misses = 0
         if time.monotonic() < ready_at:
             time.sleep(0.5)
             continue
+
+        if time.monotonic() >= scale_due:
+            set_display_scale(session)
+            scale_due = time.monotonic() + 30
 
         picture = grab(session)
         if picture is None:

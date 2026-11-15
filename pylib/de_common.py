@@ -12,7 +12,6 @@ CONFIG_FILE = "/etc/digital-examen/computers.conf"
 RUN_DIR = "/run/digital-examen"
 STATE_DIR = "/var/lib/digital-examen"
 LOG_FILE = "/var/log/digital-examen-computers.log"
-GREETER = "_greeter"
 
 
 def read_config():

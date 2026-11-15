@@ -144,6 +144,10 @@ def classify(sample):
         return {"ai": False, "confidence": 1.0, "quote": "",
                 "reason": "never-block", "model": False}
 
+    if markers.known_ai_host(host):
+        return {"ai": True, "confidence": 1.0, "quote": host,
+                "reason": "домен ИИ-сервиса", "model": False}
+
     total, found, quote = markers.score(host, url, title, text)
 
     if total >= MARKER_SURE:
