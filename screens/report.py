@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 
-import fcntl
 import json
 import os
 import sys
@@ -96,26 +95,9 @@ def send_record(computer, folder):
     }
 
     try:
-        answer = post("/api/computers/device/record", payload)
+        post("/api/computers/device/record", payload)
     except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
         return
-
-    identifier = answer.get("id")
-    if identifier is None or str(record.get("id", "")) == str(identifier):
-        return
-
-    with open(os.path.join(folder, ".record.lock"), "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            with open(path) as source:
-                latest = json.load(source)
-        except (OSError, ValueError):
-            return
-        latest["id"] = identifier
-        with open(path + ".new", "w") as output:
-            json.dump(latest, output)
-        os.replace(path + ".new", path)
-
 
 def send_seen():
     """Кто сейчас шлёт кадры - тот и включён."""

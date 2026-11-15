@@ -570,8 +570,7 @@ def find_record(computer, record_id, query):
             folder = login_dir(computer, login, started)
             with open(os.path.join(folder, "record.json")) as source:
                 record = json.load(source)
-            saved_id = record.get("id")
-            if (not saved_id or str(saved_id) == str(record_id)) and record.get("started") == started:
+            if record.get("started") == started and (record.get("login") or "") == login:
                 return folder
     except (OSError, ValueError, OverflowError):
         pass
