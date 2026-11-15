@@ -32,6 +32,10 @@ PEOPLE_EVERY = 30
 SEEN = {}
 TOLD = {}
 AI_CACHE = {}
+AI_HOSTS = de_patterns.read_list(os.path.join(
+    de_common.setting("DE_REPO_DIR", "/opt/digital-examen-computers"),
+    "proxy", "policy", "ai-domains.txt",
+))
 POLICY = {"stamp": 0, "data": {}}
 LOCK = threading.Lock()
 PEOPLE = set()
@@ -179,6 +183,8 @@ def decide(host):
     groups = sorted(policy().get("groups", []), key=lambda item: -int(item.get("priority", 50)))
     for group in groups:
         name = group.get("name", "")
+        if group.get("ai_auto") and de_patterns.any_match(AI_HOSTS, host):
+            return "block", name
         if de_patterns.any_match(group.get("always_allow"), host):
             return "pass", name
         if group.get("principle") == "allow":
