@@ -19,9 +19,6 @@ DOUBT_FILE = os.environ.get("DE_AI_DOUBT_FILE", "/models/doubt.jsonl")
 DOUBT_LOW = float(os.environ.get("DE_AI_DOUBT_LOW", "0.35"))
 DOUBT_HIGH = float(os.environ.get("DE_AI_DOUBT_HIGH", "0.75"))
 
-# Пока модели нет, копим настоящие страницы: по одной с узла в час и не
-# больше заданного числа за сутки. Из них и соберётся первая настоящая
-# выборка вместо придуманной.
 COLLECT = os.environ.get("DE_AI_COLLECT", "1") == "1"
 COLLECT_PER_DAY = int(os.environ.get("DE_AI_COLLECT_PER_DAY", "500"))
 COLLECT_HOST_SECONDS = int(os.environ.get("DE_AI_COLLECT_HOST_SECONDS", "3600"))

@@ -1,0 +1,9 @@
+{
+  "name": "ru.digital_examen.tabs",
+  "description": "Digital Examen",
+  "path": "/usr/local/bin/de-tabs-native",
+  "type": "stdio",
+  "allowed_extensions": [
+    "tabs@digital-examen.local"
+  ]
+}

@@ -15,16 +15,11 @@ services:
     environment:
       DE_COMMAND_SECRET: /etc/digital-examen/command.secret
       DE_SECRETS_DIR: /data/secrets
-      # Общий секрет на всю школу выключен: приёмник принимает только
-      # личный секрет компьютера, выданный ему при постановке на учёт.
       DE_ALLOW_SHARED_SECRET: "${DE_ALLOW_SHARED_SECRET:-0}"
       DE_SCREEN_MIN_FREE_GB: "50"
     networks:
       - de-edge
 
-  # Ночной обход: урезание 720p до 1024x576, лестница прореживания, удаление
-  # записей старше четырёх недель и соблюдение лимита в 900 ГБ. Отдельный
-  # контейнер, потому что работа тяжёлая и не должна мешать приёму кадров.
   de-screens-night:
     build: .
     image: de-screens:latest
@@ -37,9 +32,6 @@ services:
       - ./command.secret:/run/secrets/command.secret:ro
       - ./notify.secret:/run/secrets/notify.secret:ro
     environment:
-      # Внутри школьного сервера к сайту ходим напрямую по docker-сети:
-      # публичный адрес отдаётся с самоподписанным сертификатом, и проверка
-      # TLS честно падает. Лишнего хопа через VPS тут тоже не нужно.
       DE_API_URL: "${DE_SITE_INTERNAL_URL:-http://de-prod-api:8000}"
       DE_NOTIFY_URL: "http://de-alerts:8099/notify"
       DE_SCREEN_LIMIT_GB: "900"
@@ -47,8 +39,6 @@ services:
     networks:
       - de-edge
 
-  # Опись записей для сайта: какие записи есть, сколько занимают и сколько
-  # длятся. Сам приёмник сайту не звонит - у него на руках только кадры.
   de-screens-report:
     build: .
     image: de-screens:latest

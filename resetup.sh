@@ -221,7 +221,7 @@ if [ "$remove" = --remove ]; then
                     systemctl disable --now "${path##*/}"
                     unlink "$path"
                     ;;
-                /usr/local/sbin/de-*|/usr/local/bin/de-note-command|/usr/local/lib/digital-examen/de_*.py|/etc/profile.d/de-history.sh)
+                /usr/local/sbin/de-*|/usr/local/bin/de-note-command|/usr/local/bin/de-tabs-native|/etc/*/native-messaging-hosts/ru.digital_examen.tabs.json|/etc/*/policies/managed/digital-examen-tabs.json|/usr/lib*/mozilla/native-messaging-hosts/ru.digital_examen.tabs.json|/usr/local/lib/digital-examen/de_*.py|/etc/profile.d/de-history.sh)
                     [ ! -f "$path" ] || unlink "$path"
                     ;;
             esac

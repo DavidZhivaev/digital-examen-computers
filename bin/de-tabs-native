@@ -1,0 +1,30 @@
+#!/usr/bin/python3
+
+import json
+import socket
+import struct
+import sys
+import uuid
+
+source = sys.stdin.buffer
+target = sys.stdout.buffer
+
+while True:
+    header = source.read(4)
+    if len(header) != 4:
+        break
+    size, = struct.unpack("=I", header)
+    if size > 131072:
+        break
+    message = source.read(size)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
+            client.bind("\0de-tabs-" + uuid.uuid4().hex)
+            client.settimeout(2)
+            client.connect("/run/digital-examen/browser-tabs.sock")
+            client.send(message)
+            response = client.recv(131072)
+    except OSError:
+        response = b"{}"
+    target.write(struct.pack("=I", len(response)) + response)
+    target.flush()

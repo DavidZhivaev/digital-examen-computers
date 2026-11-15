@@ -39,11 +39,26 @@ for script in "$here"/bin/de-*; do
     name=${script##*/}
     case "$name" in
         de-deps) ;;
-        de-note-command) put 0755 "$script" "/usr/local/bin/$name" ;;
+        de-note-command|de-tabs-native) put 0755 "$script" "/usr/local/bin/$name" ;;
         *) put 0750 "$script" "/usr/local/sbin/$name" ;;
     esac
 done
 put 0644 "$here/config/de-history.sh" /etc/profile.d/de-history.sh
+for native in /etc/chromium/native-messaging-hosts /etc/chromium-browser/native-messaging-hosts \
+    /etc/opt/chrome/native-messaging-hosts /etc/opt/edge/native-messaging-hosts; do
+    install -d -m 0755 "$native"
+    put 0644 "$here/browser/tabs/native-chromium.json" "$native/ru.digital_examen.tabs.json"
+done
+for managed in /etc/chromium/policies/managed /etc/chromium-browser/policies/managed \
+    /etc/opt/chrome/policies/managed /etc/opt/edge/policies/managed; do
+    install -d -m 0755 "$managed"
+    put 0644 "$here/browser/tabs/managed-chromium.json" "$managed/digital-examen-tabs.json"
+done
+for native in /usr/lib/mozilla/native-messaging-hosts /usr/lib64/mozilla/native-messaging-hosts; do
+    install -d -m 0755 "$native"
+    put 0644 "$here/browser/tabs/native-firefox.json" "$native/ru.digital_examen.tabs.json"
+done
+
 
 if [ ! -f "$config" ]; then
     install -m 0640 "$here/config/computers.conf.example" "$config"
@@ -70,7 +85,7 @@ if [ -f "$state/installed-files" ]; then
                 systemctl disable --now "${path##*/}"
                 unlink "$path"
                 ;;
-            /usr/local/sbin/de-*|/usr/local/bin/de-note-command|/usr/local/lib/digital-examen/de_*.py|/etc/profile.d/de-history.sh)
+            /usr/local/sbin/de-*|/usr/local/bin/de-note-command|/usr/local/bin/de-tabs-native|/etc/*/native-messaging-hosts/ru.digital_examen.tabs.json|/etc/*/policies/managed/digital-examen-tabs.json|/usr/lib*/mozilla/native-messaging-hosts/ru.digital_examen.tabs.json|/usr/local/lib/digital-examen/de_*.py|/etc/profile.d/de-history.sh)
                 [ ! -f "$path" ] || unlink "$path"
                 ;;
         esac

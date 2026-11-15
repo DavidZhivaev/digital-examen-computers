@@ -347,11 +347,11 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, {"ok": True})
             return
 
-        if route == "/console":
+        if route in ("/console", "/close-tab"):
             if not self.allowed(True):
                 self.reply(403, {"error": "bad secret"})
                 return
-            self.run_console(safe_name(query.get("computer", [""])[0]))
+            self.run_console(safe_name(query.get("computer", [""])[0]), route == "/close-tab")
             return
 
         parts = route.strip("/").split("/")
@@ -419,7 +419,7 @@ class Handler(BaseHTTPRequestHandler):
 
         self.reply(200, {"ok": True, "interval": watched_interval(header.get("computer", ""))})
 
-    def run_console(self, computer):
+    def run_console(self, computer, close_tab=False):
         payload = self.body_json()
         if payload is None or not computer:
             self.reply(400, {"error": "bad request"})
@@ -431,8 +431,9 @@ class Handler(BaseHTTPRequestHandler):
 
         queue_command(computer, {
             "id": identifier,
-            "name": "exec",
-            "text": str(payload.get("command", "")),
+            "name": "close-tab" if close_tab else "exec",
+            "tab": str(payload.get("tab", "")) if close_tab else "",
+            "text": "" if close_tab else str(payload.get("command", "")),
         })
 
         deadline = time.time() + CONSOLE_WAIT

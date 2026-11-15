@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Digital Examen — вкладки",
+  "version": "1.0.0",
+  "permissions": [
+    "tabs",
+    "nativeMessaging",
+    "alarms"
+  ],
+  "background": {
+    "service_worker": "tabs.js"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0utWe38Us+SarWpbA++6Tl124eqAJjK8CgENTUSmfk9bshLvLZhH9OtEwpAbR/bwNBzyUkR9OTuMgZq9m1/prfYGbiHa1PuGlddYUBhzW1Sbgq9czzb3BWLEribk+rOgxZo0Ic/8nAY3I+F1I4Q6TozZAEJk3cpiHEfOJ8p9YpwJdfgV08I9n1LZaL1gGSPr0YfSMHuZTHNF8Qs6xRUu4+f9dX9gONXFj/6/2QybWePEtptDn88dphVrTT5wwcHSxAQbkfce4TNMB3xLqI+AMQp8tAUhFlMLMf0CkClAFPMYuEbvMkkh3p41o7Ph8dR99vWKvpaRLUka1trunILZ7wIDAQAB",
+  "update_url": "https://ex.1580.ru/browser-tabs/update.xml"
+}

@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Digital Examen — вкладки",
+  "version": "1.0.0",
+  "permissions": [
+    "tabs",
+    "nativeMessaging",
+    "alarms"
+  ],
+  "background": {
+    "scripts": [
+      "tabs.js"
+    ]
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "tabs@digital-examen.local",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  }
+}
