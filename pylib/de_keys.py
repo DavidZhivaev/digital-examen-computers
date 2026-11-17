@@ -16,49 +16,47 @@ def name_matches(filename, wanted):
     stem, dot, ext = wanted.rpartition(".")
     if not dot:
         stem, ext = wanted, ""
-    pattern = r"^" + re.escape(stem) + r"(?:[ _-]*\(\d+\)|[ _-]*\d+)?"
+    pattern = r"^" + re.escape(stem) + r".*"
     if ext:
         pattern += r"\." + re.escape(ext)
-    pattern += r"$"
-    return re.match(pattern, filename.strip(), re.IGNORECASE) is not None
+    return re.fullmatch(pattern, filename.strip(), re.IGNORECASE) is not None
 
 
 def find_in(folder, wanted):
-    try:
-        names = sorted(os.listdir(folder))
-    except OSError:
-        return ""
     found = []
-    for name in names:
-        if not name_matches(name, wanted):
-            continue
-        path = os.path.join(folder, name)
-        if not os.path.islink(path) and os.path.isfile(path) and os.path.getsize(path) <= 65536:
-            found.append(path)
-    if not found:
-        return ""
-    found.sort(key=lambda path: os.path.getmtime(path), reverse=True)
-    return found[0]
+    for root, dirs, names in os.walk(folder, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if not os.path.islink(os.path.join(root, d)))
+        for name in sorted(names):
+            if not name_matches(name, wanted):
+                continue
+            path = os.path.join(root, name)
+            try:
+                if not os.path.islink(path) and os.path.isfile(path) and os.path.getsize(path) <= 65536 and read_token(path):
+                    found.append((os.path.getmtime(path), path))
+            except OSError:
+                continue
+    return max(found, default=(0, ""))[1]
 
 
 def usb_partitions():
     try:
         output = subprocess.check_output(
-            ["lsblk", "-J", "-o", "PATH,TRAN,MOUNTPOINT,FSTYPE,TYPE"],
+            ["lsblk", "-J", "-o", "PATH,TRAN,RM,HOTPLUG,MOUNTPOINT,FSTYPE,TYPE"],
             stderr=subprocess.DEVNULL, timeout=10)
         tree = json.loads(output.decode("utf-8", "replace"))
     except (OSError, ValueError, subprocess.SubprocessError):
         return []
     out = []
+
+    def visit(device, external=False):
+        external = external or device.get("tran") == "usb" or device.get("rm") in (True, 1, "1") or device.get("hotplug") in (True, 1, "1")
+        if external and device.get("fstype") and device.get("path"):
+            out.append(device)
+        for child in device.get("children") or []:
+            visit(child, external)
+
     for disk in tree.get("blockdevices", []):
-        if disk.get("type") != "disk":
-            continue
-        if disk.get("tran") != "usb":
-            continue
-        parts = disk.get("children") or [disk]
-        for part in parts:
-            if part.get("fstype"):
-                out.append(part)
+        visit(disk)
     return out
 
 
@@ -104,8 +102,9 @@ def looks_like_token(line):
 
 def read_token(path):
     try:
-        data = open(path).read()
-    except IOError:
+        with open(path, encoding="utf-8-sig") as source:
+            data = source.read(65537)
+    except (OSError, UnicodeError):
         return ""
     for line in data.splitlines():
         line = line.strip()
