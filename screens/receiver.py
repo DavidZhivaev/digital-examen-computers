@@ -67,6 +67,8 @@ def computer_secrets(computer):
     except (ValueError, OSError):
         return []
 
+    if values.get("revoked"):
+        return None
     out = [str(values.get("screen", ""))]
     rotated = int(values.get("rotated", 0) or 0)
     if values.get("previous") and time.time() - rotated <= SECRET_GRACE_SECONDS:
@@ -82,7 +84,7 @@ def save_computer_secrets(computer, values):
     os.chmod(SECRETS_DIR, 0o700)
     path = os.path.join(SECRETS_DIR, name + ".json")
     old = ""
-    if os.path.exists(path):
+    if os.path.exists(path) and not values.get("revoked"):
         try:
             old = str(json.loads(open(path).read()).get("screen", ""))
         except (ValueError, OSError):
@@ -91,6 +93,7 @@ def save_computer_secrets(computer, values):
     out = open(path + ".new", "w")
     out.write(json.dumps({
         "screen": str(values.get("screen", "")),
+        "revoked": bool(values.get("revoked")),
         "previous": old,
         "rotated": int(time.time()),
     }))
@@ -277,10 +280,12 @@ class Handler(BaseHTTPRequestHandler):
         return same(sent, read_secret()) or same(sent, read_command_secret())
 
     def allowed_computer(self, computer):
+        own = computer_secrets(computer)
+        if own is None:
+            return False
         sent = self.headers.get("X-De-Secret", "")
-        for own in computer_secrets(computer):
-            if same(sent, own):
-                return True
+        if any(same(sent, secret) for secret in own):
+            return True
         if same(sent, read_command_secret()):
             return True
         if ALLOW_SHARED and same(sent, read_secret()):
@@ -312,10 +317,21 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 self.reply(400, {"error": "bad json"})
                 return
-            if not save_computer_secrets(payload.get("computer", ""), payload):
+            computer = safe_name(payload.get("computer", ""))
+            with LOCK:
+                saved = save_computer_secrets(computer, payload)
+                if saved and payload.get("revoked"):
+                    for cache in (WATCHED, QUEUES, STATS, POLICY):
+                        cache.pop(computer, None)
+                    for suffix in (".webp", ".seen"):
+                        try:
+                            os.unlink(os.path.join(LIVE_DIR, computer + suffix))
+                        except FileNotFoundError:
+                            pass
+            if not saved:
                 self.reply(400, {"error": "bad computer"})
                 return
-            self.reply(200, {"ok": True})
+            self.reply(200, {"ok": True, "revoked": bool(payload.get("revoked"))})
             return
 
         if route == "/result":
@@ -383,6 +399,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         body = self.rfile.read(length)
+        if not self.allowed_computer(self.headers.get("X-De-Computer", "")):
+            self.reply(403, {"error": "bad secret"})
+            return
         split = body.find(b"\n")
         if split < 0:
             self.reply(400, {"error": "no header"})

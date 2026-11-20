@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -235,17 +236,59 @@ def stats_loop():
             pass
 
 
+def save_heartbeat_policy(answer):
+    policy = answer.get("policy")
+    if isinstance(policy, dict):
+        enabled = "0" if policy.get("screen_enabled") is False else "1"
+        if de_common.read_file(de_common.SCREEN_ENABLED_FILE) != enabled:
+            de_common.write_file(de_common.SCREEN_ENABLED_FILE, enabled)
+        save_policy(policy)
+
+
 def heartbeat_loop():
+    last_conflict = ""
     while True:
+        hostname = socket.gethostname()
+        place = de_common.hostname_place(hostname)
+        target = "%dk-%d-%d" % place if place else COMPUTER
+        moved = target != COMPUTER
+        url = API.rstrip("/") + "/api/computers/device/heartbeat"
+        payload = {"computer": COMPUTER, "online": True, "login": de_common.current_user()}
+        if place:
+            payload.update(hostname=hostname, sync_screen=moved)
         try:
-            answer = de_common.send_json(API.rstrip("/") + "/api/computers/device/heartbeat", {
-                "computer": COMPUTER,
-                "online": True,
-                "login": de_common.current_user(),
-            }, "proxy", 15)
-            if "policy" in answer:
-                save_policy(answer["policy"])
-        except (OSError, ValueError):
+            try:
+                answer = de_common.send_json(url, payload, "proxy", 15)
+            except urllib.error.HTTPError as error:
+                if moved and error.code == 409:
+                    if target != last_conflict:
+                        log("место %s занято. Удалите прежнее устройство в настройках кабинета" % target)
+                        last_conflict = target
+                    payload.pop("hostname", None)
+                    answer = de_common.send_json(url, payload, "proxy", 15)
+                    save_heartbeat_policy(answer)
+                    time.sleep(HEARTBEAT_INTERVAL)
+                    continue
+                if not moved or error.code != 403:
+                    raise
+                payload["computer"] = target
+                answer = de_common.send_json(url, payload, "proxy", 15, identity=target)
+            save_heartbeat_policy(answer)
+            last_conflict = ""
+            if moved and answer.get("computer") == target and answer.get("screen_ready"):
+                de_common.write_place(target, place)
+                log("регистрация перенесена в " + target)
+                subprocess.run(
+                    ["systemctl", "--no-block", "restart", "de-agent.service",
+                     "de-screen.service", "de-net.service", "de-traffic.service"],
+                    check=True,
+                )
+                return
+        except urllib.error.HTTPError as error:
+            if error.code in (403, 404):
+                if de_common.read_file(de_common.SCREEN_ENABLED_FILE) != "0":
+                    de_common.write_file(de_common.SCREEN_ENABLED_FILE, "0")
+        except (OSError, ValueError, subprocess.CalledProcessError):
             pass
         time.sleep(HEARTBEAT_INTERVAL)
 

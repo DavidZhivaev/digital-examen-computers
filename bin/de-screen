@@ -329,6 +329,11 @@ def remember(body, frame_no):
         return False
 
 
+def screen_enabled():
+    return de_common.read_file(de_common.SCREEN_ENABLED_FILE) != "0"
+
+
+
 class Senders:
 
     def __init__(self):
@@ -358,6 +363,8 @@ class Senders:
                 self.live_ready.wait_for(lambda: self.live_frame is not None)
                 body = self.live_frame
                 self.live_frame = None
+            if not screen_enabled():
+                continue
             try:
                 self.post(body)
             except (OSError, ValueError):
@@ -367,13 +374,21 @@ class Senders:
         while True:
             self.archive_ready.wait(timeout=2)
             self.archive_ready.clear()
-            files = queue_files()
-            for path in files:
+            if not screen_enabled():
+                continue
+            for path in queue_files():
+                if not screen_enabled():
+                    break
                 try:
                     with open(path, "rb") as source:
-                        body = source.read()
-                except OSError:
+                        header = source.readline()
+                        if json.loads(header).get("computer") != COMPUTER:
+                            continue
+                        body = header + source.read()
+                except (OSError, ValueError):
                     continue
+                if not screen_enabled():
+                    break
                 try:
                     self.post(body)
                 except (OSError, ValueError):
@@ -408,6 +423,11 @@ def main():
 
     while True:
         started = time.time()
+        if not screen_enabled():
+            senders.clear_live()
+            last_key = ""
+            time.sleep(1)
+            continue
         session = de_common.screen_session()
         if session is None or session.get("Class") == "greeter":
             senders.clear_live()

@@ -3,6 +3,7 @@ import grp
 import json
 import os
 import pwd
+import re
 import subprocess
 import tempfile
 import time
@@ -11,6 +12,7 @@ import urllib.request
 CONFIG_FILE = "/etc/digital-examen/computers.conf"
 RUN_DIR = "/run/digital-examen"
 STATE_DIR = "/var/lib/digital-examen"
+SCREEN_ENABLED_FILE = os.path.join(STATE_DIR, "screen-enabled")
 LOG_FILE = "/var/log/digital-examen-computers.log"
 
 
@@ -75,6 +77,24 @@ def computer():
     return setting("DE_COMPUTER_ID")
 
 
+def hostname_place(hostname):
+    match = re.fullmatch(r"m1580-([0-9]{1,2})-([0-9]{1,4})-([0-9]{1,3})", hostname)
+    if match:
+        place = tuple(map(int, match.groups()))
+        if all(place):
+            return place
+    return None
+
+
+def write_place(name, place, **settings):
+    corpus, room, number = place
+    values = read_config()
+    values.update(settings, DE_COMPUTER_ID=name, DE_COMPUTER_CORPUS=corpus,
+                  DE_COMPUTER_ROOM=room, DE_COMPUTER_NUMBER=number)
+    lines = ['%s="%s"\n' % (key, value) for key, value in values.items()]
+    write_file(CONFIG_FILE, "".join(lines), 0o640)
+
+
 def secret(kind):
     return read_file("/etc/digital-examen/%s.secret" % kind)
 
@@ -90,10 +110,10 @@ def run(command, seconds=10, env=None):
     return done.returncode, done.stdout.decode("utf-8", "replace")
 
 
-def send_json(url, payload, kind="proxy", seconds=20):
+def send_json(url, payload, kind="proxy", seconds=20, identity=None):
     request = urllib.request.Request(url, data=json.dumps(payload).encode())
     request.add_header("Content-Type", "application/json")
-    request.add_header("X-De-Computer", computer())
+    request.add_header("X-De-Computer", identity or computer())
     request.add_header("X-De-Secret", secret(kind))
     answer = urllib.request.urlopen(request, timeout=seconds)
     return json.loads(answer.read().decode("utf-8"))

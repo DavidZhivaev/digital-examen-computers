@@ -71,58 +71,6 @@ def read_key():
             return {}
 
 
-def ask_number(question, low, high):
-    while True:
-        try:
-            raw = input(question + ": ").strip()
-        except (EOFError, KeyboardInterrupt):
-            return None
-        if raw.isdigit() and low <= int(raw) <= high:
-            return int(raw)
-        say("Нужно число от %d до %d" % (low, high))
-
-
-def write_config(values):
-    lines = []
-    seen = set()
-    for line in open(de_common.CONFIG_FILE):
-        key = line.split("=", 1)[0].strip()
-        if key in values:
-            lines.append('%s="%s"\n' % (key, values[key]))
-            seen.add(key)
-        else:
-            lines.append(line)
-    for key, value in values.items():
-        if key not in seen:
-            lines.append('%s="%s"\n' % (key, value))
-    de_common.write_file(de_common.CONFIG_FILE, "".join(lines), 0o640)
-
-
-def choose_place():
-    while True:
-        corpus = ask_number("Номер корпуса", 1, 99)
-        room = ask_number("Номер аудитории", 1, 9999) if corpus else None
-        number = ask_number("Номер компьютера в аудитории", 1, 999) if room else None
-        if number is None:
-            return None
-        name = "%dk-%d-%d" % (corpus, room, number)
-        try:
-            busy = call("/api/computers/device/taken", None,
-                        {"corpus": corpus, "room": room, "number": number})
-        except (OSError, ValueError) as error:
-            say("Сайт не ответил: %s" % error)
-            return None
-        if busy.get("taken") and busy.get("hostname") != socket.gethostname():
-            say("Место %s уже занято машиной %s, выберите другой номер" % (name, busy.get("hostname") or "с другим именем"))
-            continue
-        try:
-            yes = input("Компьютер будет называться %s. Верно? [да/нет]: " % name).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            return None
-        if yes in ("да", "д", "y", "yes", ""):
-            return corpus, room, number, name
-
-
 def main():
     if os.geteuid() != 0:
         say("Запускать от root")
@@ -131,36 +79,24 @@ def main():
         say("Нет %s, сначала setup.sh" % de_common.CONFIG_FILE)
         return 1
 
+    hostname = socket.gethostname()
+    place = de_common.hostname_place(hostname)
+    if place is None:
+        say("Ожидается hostname вида m1580-2-418-1 с положительными числами")
+        return 1
+
     fetch_public_key()
     key = read_key()
     if not key:
         say("Ключ не предъявлен, установка прервана")
         return 1
 
-    existing = de_common.computer()
-    if existing:
-        try:
-            again = input("Компьютер уже на учёте как %s. Переназначить? [нет/да]: " % existing).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            return 0
-        if again not in ("да", "д", "y", "yes"):
-            return 0
-
-    say("Постановка на учёт, сайт %s" % API)
-    place = choose_place()
-    if place is None:
-        say("Отменено")
-        return 1
-    corpus, room, number, name = place
-
+    say("Постановка %s на учёт, сайт %s" % (hostname, API))
+    name = "%dk-%d-%d" % place
     try:
         created = call("/api/computers/device/enroll", {
-            "corpus": corpus,
-            "room": room,
-            "number": number,
-            "hostname": socket.gethostname(),
+            "hostname": hostname,
             "token": key.get("token", ""),
-            "computer": name,
         })
     except urllib.error.HTTPError as error:
         say("Сайт отказал: %s %s" % (error.code, error.read().decode("utf-8", "replace")[:300]))
@@ -174,17 +110,15 @@ def main():
         if value:
             de_common.write_file("/etc/digital-examen/%s.secret" % kind, value + "\n", 0o600)
 
-    write_config({
-        "DE_COMPUTER_ID": created.get("computer", name),
-        "DE_COMPUTER_CORPUS": str(corpus),
-        "DE_COMPUTER_ROOM": str(room),
-        "DE_COMPUTER_NUMBER": str(number),
-        "DE_API_URL": API,
-        "DE_SCREEN_URL": created.get("screen_url", "https://ex.1580.ru/screens"),
-    })
+    de_common.write_place(
+        created.get("computer", name), place, DE_API_URL=API,
+        DE_SCREEN_URL=created.get("screen_url", "https://ex.1580.ru/screens"),
+    )
 
     if created.get("policy"):
-        de_common.write_file(POLICY_FILE, json.dumps(created["policy"], sort_keys=True))
+        policy = created["policy"]
+        de_common.write_file(POLICY_FILE, json.dumps(policy, sort_keys=True))
+        de_common.write_file(de_common.SCREEN_ENABLED_FILE, "0" if policy.get("screen_enabled") is False else "1")
 
     say("Готово, компьютер на учёте как %s" % created.get("computer", name))
     return 0
