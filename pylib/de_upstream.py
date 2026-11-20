@@ -1,7 +1,10 @@
 """Route filtered web connections through the school HTTP proxy."""
+import base64
+import hmac
 import ipaddress
 import re
 import socket
+import time
 
 
 class ProxyDenied(Exception):
@@ -18,9 +21,18 @@ def authority(host, port):
     return f"[{address}]:{port}" if address.version == 6 else f"{address}:{port}"
 
 
-def tunnel(upstream, host, port):
+def authorization(computer, secret, login):
+    stamp = int(time.time()) // 30 * 30
+    message = f"de-proxy-v1\n{computer}\n{stamp}\n{login}".encode()
+    signature = hmac.digest(secret.encode(), message, "sha256").hex()
+    credential = f"{login}:de1:{computer}:{stamp}:{signature}".encode()
+    return b"Proxy-Authorization: Basic " + base64.b64encode(credential)
+
+
+def tunnel(upstream, host, port, credential=b""):
     target = authority(host, port)
-    upstream.sendall(f"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n".encode("ascii"))
+    headers = f"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n".encode("ascii")
+    upstream.sendall(headers + (credential + b"\r\n" if credential else b"") + b"\r\n")
     # Before TLS starts, the proxy can send only the CONNECT response.
     with upstream.makefile("rb") as response:
         line = response.readline(4097)
@@ -41,7 +53,7 @@ def tunnel(upstream, host, port):
 TOKEN = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 
-def http_request(data, host, port):
+def http_request(data, host, port, credential=b""):
     head, separator, pending = data.partition(b"\r\n\r\n")
     if not separator:
         raise ValueError("неполный запрос HTTP")
@@ -69,6 +81,8 @@ def http_request(data, host, port):
     length = lengths[0] if lengths else 0
     target = authority(host, port).encode("ascii")
     headers.extend((b"Host: " + target, b"Connection: close"))
+    if credential:
+        headers.append(credential)
     first = b" ".join((method, b"http://" + target + path, version))
     body = pending[:length]
     return b"\r\n".join([first, *headers]) + b"\r\n\r\n" + body, length - len(body)

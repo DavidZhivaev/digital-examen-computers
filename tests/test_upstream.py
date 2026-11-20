@@ -1,3 +1,4 @@
+import base64
 import socket
 import sys
 import unittest
@@ -19,6 +20,13 @@ class UpstreamTests(unittest.TestCase):
         self.assertTrue(forward.startswith(b"POST http://example.org:80/submit HTTP/1.1\r\n"))
         self.assertTrue(forward.endswith(b"\r\n\r\nabc"))
         self.assertEqual(remaining, 0)
+
+    def test_credential_has_a_proof_instead_of_the_device_secret(self):
+        header = de_upstream.authorization("2k-418-1", "private-secret", "student")
+        fields = base64.b64decode(header.split()[-1]).decode().split(":")
+        self.assertEqual(fields[:3], ["student", "de1", "2k-418-1"])
+        self.assertEqual(len(fields[-1]), 64)
+        self.assertNotIn("private-secret", ":".join(fields))
 
     def test_ambiguous_http_body_is_rejected(self):
         headers = b"POST / HTTP/1.1\r\nHost: example.org\r\nContent-Length: 3\r\n"

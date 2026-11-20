@@ -10,6 +10,14 @@ LEGACY_PROXY = re.compile(
     re.IGNORECASE,
 )
 
+LEGACY_NO_PROXY = (
+    'localhost,127.0.0.1,10.0.0.0/8,172.0.0.0/8'
+    ',bf726e13342a.hosting.myjino.ru,downloads.arduino.cc,login.mos.ru,mos.ru'
+    ',online.olimpiada.ru,repo.os.mos.ru,school.mos.ru,sdo.1580.ru'
+    ',silvertests.ru,spt.gppc.ru,tinkercad.com,uchebnik.mos.ru'
+    ',www.tinkercad.com'
+)
+
 
 def remove_legacy_proxy(path):
     path = Path(path)
@@ -20,7 +28,11 @@ def remove_legacy_proxy(path):
         details = path.stat()
     except FileNotFoundError:
         return False
-    after = "".join(line for line in before.splitlines(keepends=True) if not LEGACY_PROXY.fullmatch(line))
+    before_lines = before.splitlines(keepends=True)
+    after = "".join(
+        line for line in before_lines
+        if not LEGACY_PROXY.fullmatch(line) and line.strip() != f'no_proxy="{LEGACY_NO_PROXY}"'
+    )
     if after == before or path.stat() != details or path.read_text() != before:
         return False
     de_common.write_file(path, after, details.st_mode & 0o777)

@@ -1,42 +1,47 @@
 #!/usr/bin/python3
 
-import base64
+import hmac
+import json
 import os
 import sys
+import urllib.request
+from urllib.parse import unquote
 
 SECRET_FILE = os.environ.get("DE_PROXY_SECRET_FILE", "/etc/squid/proxy.secret")
+AUTH_URL = os.environ.get("DE_PROXY_AUTH_URL", "http://de-prod-api:8000/api/computers/device/proxy-auth")
+HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def read_secret():
-    if not os.path.exists(SECRET_FILE):
+def read_secret(path):
+    try:
+        with open(path) as source:
+            return source.read().strip()
+    except OSError:
         return ""
-    return open(SECRET_FILE).read().strip()
 
 
-def unquote(text):
-    out = ""
-    index = 0
-    while index < len(text):
-        if text[index] == "%" and index + 2 < len(text):
-            out += chr(int(text[index + 1:index + 3], 16))
-            index += 3
-            continue
-        out += text[index]
-        index += 1
-    return out
+def authorized(login, password):
+    if password.startswith("de1:"):
+        request = urllib.request.Request(
+            AUTH_URL, data=json.dumps({"login": login, "proof": password}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with HTTP.open(request, timeout=3) as response:
+            return json.load(response).get("ok") is True
+    secret = read_secret(SECRET_FILE)
+    return bool(secret) and hmac.compare_digest(password.encode(), secret.encode())
 
 
 for line in sys.stdin:
     parts = line.strip().split(" ")
-    if len(parts) < 2:
-        sys.stdout.write("ERR\n")
-        sys.stdout.flush()
+    if len(parts) != 2:
+        print("ERR", flush=True)
         continue
-    login = unquote(parts[0])
-    password = unquote(parts[1])
-    secret = read_secret()
-    if secret and password == secret and login:
-        sys.stdout.write("OK user=" + login + "\n")
-    else:
-        sys.stdout.write("ERR\n")
-    sys.stdout.flush()
+    login, password = map(unquote, parts)
+    if not login or not all(char.isalnum() or char in "@._-+" for char in login):
+        print("ERR", flush=True)
+        continue
+    try:
+        print("OK" if authorized(login, password) else "ERR", flush=True)
+    except (OSError, ValueError):
+        print("BH", flush=True)
