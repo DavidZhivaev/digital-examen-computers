@@ -30,6 +30,7 @@ PROBE_HOST = de_common.setting("DE_NET_SCHOOL_PROXY_PROBE_HOST", "ex.1580.ru")
 PROXY_READY = threading.Event()
 TABLE = "de_agent"
 RELAY_MARK = 0x44450000
+SCHOOL_PROXY_MARK = 0x44450001
 RELAY_DIRECT = de_common.setting("DE_NET_RELAY_DIRECT", "1") == "1"
 RELAY_RULE = ["pref", "8999", "fwmark", hex(RELAY_MARK) + "/0xffffffff", "lookup", "main"]
 POLICY_FILE = os.path.join(de_common.STATE_DIR, "policy.json")
@@ -107,16 +108,23 @@ def relay_exception(enable):
     for tool, loopback in (("iptables", "127.0.0.1"), ("ip6tables", "::1")):
         rules = [
             ["-m", "owner", "--uid-owner", "0", "-m", "mark", "--mark",
-             hex(RELAY_MARK), "-p", "tcp", "-m", "multiport", "--dports",
-             ",".join(map(str, sorted({80, 443, UPSTREAM_PORT})))],
+             hex(RELAY_MARK), "-p", "tcp", "-m", "multiport", "--dports", "80,443"],
+            ["-m", "owner", "--uid-owner", "0", "-m", "mark", "--mark",
+             hex(SCHOOL_PROXY_MARK), "-p", "tcp", "--dport", str(UPSTREAM_PORT)],
             ["-d", loopback, "-p", "tcp", "--dport", str(PROXY_PORT)],
             ["-d", loopback, "-p", "udp", "--dport", str(DNS_PORT)],
         ]
+        legacy_ports = ",".join(map(str, sorted({80, 443, UPSTREAM_PORT})))
+        prefix = [tool, "-w", "2"]
+        options = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         try:
+            if legacy_ports != "80,443":
+                subprocess.call(prefix + ["-D", "OUTPUT", "-m", "owner", "--uid-owner", "0",
+                                "-m", "mark", "--mark", hex(RELAY_MARK), "-p", "tcp", "-m",
+                                "multiport", "--dports", legacy_ports, "-m", "comment",
+                                "--comment", "Digital Examen web relay", "-j", "ACCEPT"], **options)
             for match in rules:
                 match += ["-m", "comment", "--comment", "Digital Examen web relay", "-j", "ACCEPT"]
-                prefix = [tool, "-w", "2"]
-                options = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
                 present = subprocess.call(prefix + ["-C", "OUTPUT"] + match, **options) == 0
                 if enable and not present:
                     subprocess.call(prefix + ["-I", "OUTPUT", "1"] + match, **options)
@@ -198,7 +206,7 @@ def probe_loop():
             if not credential:
                 proxy_state(False)
             else:
-                with connect_web(UPSTREAM_HOST, UPSTREAM_PORT, False, timeout=4) as upstream:
+                with connect_web(UPSTREAM_HOST, UPSTREAM_PORT, False, timeout=4, mark=SCHOOL_PROXY_MARK) as upstream:
                     status = de_upstream.tunnel(upstream, PROBE_HOST, 443, credential)
                     proxy_state(status in (200, 403))
         except (OSError, ValueError):
@@ -437,14 +445,14 @@ def proxy_target(data):
     return address.hostname, port, payload, tunnel
 
 
-def connect_web(host, port, public_only, timeout=10):
+def connect_web(host, port, public_only, timeout=10, mark=RELAY_MARK):
     for family, kind, protocol, _, address in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
         if public_only and not ipaddress.ip_address(address[0]).is_global:
             continue
         upstream = socket.socket(family, kind, protocol)
         try:
             upstream.settimeout(timeout)
-            upstream.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, RELAY_MARK)
+            upstream.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, mark)
             upstream.connect(address)
             return upstream
         except OSError:
@@ -453,7 +461,7 @@ def connect_web(host, port, public_only, timeout=10):
 
 
 def connect_proxy(host, port, secure, credential):
-    upstream = connect_web(UPSTREAM_HOST, UPSTREAM_PORT, False, timeout=4)
+    upstream = connect_web(UPSTREAM_HOST, UPSTREAM_PORT, False, timeout=4, mark=SCHOOL_PROXY_MARK)
     try:
         if secure and de_upstream.tunnel(upstream, host, port, credential) != 200:
             raise de_upstream.ProxyDenied()
