@@ -10,7 +10,7 @@ StateDirectory=de-inspect
 StateDirectoryMode=0700
 Environment=PYTHONPATH=/usr/local/lib/digital-examen
 ExecStartPre=+/usr/bin/python3.8 /usr/local/lib/digital-examen/de_inspection_ca.py
-ExecStart=/opt/de-inspect/bin/mitmdump --mode regular --listen-host 127.0.0.1 --listen-port 3130 --set confdir=/var/lib/de-inspect --set connection_strategy=eager --set http2=false --set flow_detail=0 --set termlog_verbosity=error --set command_history=false --set anticomp=true --set body_size_limit=128m --set stream_large_bodies=128k -s /usr/local/lib/digital-examen/de_inspection_addon.py
+ExecStart=/opt/de-inspect/bin/mitmdump --mode regular --listen-host 127.0.0.1 --listen-port 3130 --set confdir=/var/lib/de-inspect --set connection_strategy=eager --set http2=false --set flow_detail=0 --set termlog_verbosity=error --set command_history=false --set body_size_limit=128m --set stream_large_bodies=128k -s /usr/local/lib/digital-examen/de_inspection_addon.py
 ExecStartPost=/usr/bin/python3.8 /usr/local/lib/digital-examen/de_inspection_ca.py ready
 Restart=always
 RestartSec=3s

@@ -442,16 +442,21 @@ def inspect_http(client, upstream, data, host, port):
         body.extend(chunk)
         remaining -= len(chunk)
     rules = de_inspection.groups.get()
-    if de_inspection.url_blocked(host, target=payload.split(b" ", 2)[1].decode("ascii"), rules=rules) or de_inspection.matches_content([head, body], rules):
-        client.sendall(blocked_response())
-        return True
     first, *headers = head.split(b"\r\n")
     method, target, version = first.split()
+    url = target.decode("ascii")
+    scan = not de_inspection.url_allowed(host, url, rules) and bool(de_inspection.content_terms(rules))
+    if de_inspection.url_blocked(host, url, rules) or (scan and de_inspection.matches_content([head, body], rules)):
+        client.sendall(blocked_response())
+        return True
     path = target[len(b"http://" + de_upstream.authority(host, port).encode("ascii")):]
-    headers = [line for line in headers if line.split(b":", 1)[0].lower() not in
-               (b"accept-encoding", b"upgrade", b"expect")]
-    request = b"\r\n".join([b" ".join((method, path, version)), *headers,
-                            b"Accept-Encoding: identity", b"", body])
+    excluded_request = {b"upgrade", b"expect"}
+    if scan:
+        excluded_request.add(b"accept-encoding")
+    headers = [line for line in headers if line.split(b":", 1)[0].lower() not in excluded_request]
+    if scan:
+        headers.append(b"Accept-Encoding: identity")
+    request = b"\r\n".join([b" ".join((method, path, version)), *headers, b"", body])
     upstream.sendall(request)
     with http.client.HTTPResponse(upstream, method=method.decode("ascii")) as reply:
         reply.begin()
@@ -459,16 +464,19 @@ def inspect_http(client, upstream, data, host, port):
             raise ValueError("смена протокола не поддерживается")
         fields = reply.getheaders()
         status = "HTTP/1.1 %d " % reply.status
-        response_headers = "\r\n".join("%s: %s" % field for field in fields)
-        prefix = reply.read(de_inspection.MAX_BODY)
-        content_type = reply.headers.get_content_type()
-        encoding = reply.headers.get("Content-Encoding", "identity").lower()
-        text = content_type.startswith("text/") or content_type.endswith(("json", "xml", "javascript"))
-        inspected = de_inspection.text_prefix(prefix, encoding) if text else b""
-        if de_inspection.matches_content(
-                [head, body, (status + "\r\n" + response_headers).encode("latin-1"), inspected], rules):
-            client.sendall(blocked_response())
-            return True
+        prefix = b""
+        if scan:
+            response_headers = "\r\n".join("%s: %s" % field for field in fields)
+            content_type = reply.headers.get_content_type()
+            encoding = reply.headers.get("Content-Encoding", "identity").lower()
+            text = content_type.startswith("text/") or content_type.endswith(("json", "xml", "javascript"))
+            if text:
+                prefix = reply.read(de_inspection.MAX_BODY)
+            if de_inspection.matches_content(
+                    [head, body, (status + "\r\n" + response_headers).encode("latin-1"),
+                     de_inspection.text_prefix(prefix, encoding)], rules):
+                client.sendall(blocked_response())
+                return True
         excluded = {"connection", "transfer-encoding", "trailer", "upgrade", "keep-alive"}
         excluded.update(name.strip().lower() for name in reply.headers.get("Connection", "").split(","))
         if method != b"HEAD":

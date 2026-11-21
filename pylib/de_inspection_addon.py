@@ -23,9 +23,10 @@ MANAGEMENT_HOST = urlsplit(de_common.setting("DE_API_URL", "https://ex.1580.ru")
 GROUP_CONFIG_PATH = re.compile(r"/api/computers/groups(?:/[0-9]+(?:/save)?)?/?$")
 
 
-def scans_content(request):
-    return not (request.host.lower().rstrip(".") == MANAGEMENT_HOST
-                and GROUP_CONFIG_PATH.fullmatch(urlsplit(request.path).path))
+def scans_content(request, rules):
+    return not (inspection.url_allowed(request.host, request.pretty_url, rules)
+                or (inspection.host_name(request.host) == MANAGEMENT_HOST
+                    and GROUP_CONFIG_PATH.fullmatch(urlsplit(request.path).path)))
 
 
 AI_BLOCKED_CONNECTIONS = set()
@@ -127,42 +128,58 @@ def request(flow):
     rules = inspection.groups.get()
     if not rules:
         return
-    domain_blocked = (flow.client_conn.id in AI_BLOCKED_CONNECTIONS
-                      or inspection.url_blocked(request.host, request.pretty_url, rules))
-    if domain_blocked or (scans_content(request) and (
-            (any(rule.get("ai_auto") for rule in rules) and ai_request(request))
-            or (inspection.content_terms(rules) and inspection.matches_content([request_text(request)], rules)))):
+    domain_blocked = inspection.url_blocked(request.host, request.pretty_url, rules)
+    cached_ai_block = (flow.client_conn.id in AI_BLOCKED_CONNECTIONS
+                       and not inspection.url_allowed(request.host, request.pretty_url, rules))
+    if domain_blocked or cached_ai_block:
         flow.response = blocked()
+        return
+    if not scans_content(request, rules):
+        return
+    if any(rule.get("ai_auto") for rule in rules) and ai_request(request):
+        flow.response = blocked()
+        return
+    if inspection.content_terms(rules):
+        if inspection.matches_content([request_text(request)], rules):
+            flow.response = blocked()
+        else:
+            request.anticomp()
 
 
 def responseheaders(flow):
-    if not scans_content(flow.request):
-        return
     before = flow.response
     rules = inspection.groups.get()
+    if not scans_content(flow.request, rules):
+        before.stream = True
+        return
     location = before.headers.get("location", "")
     if location and 300 <= before.status_code < 400:
         target = urljoin(flow.request.pretty_url, location)
         host = urlsplit(target).hostname
         if host and (inspection.url_blocked(host, target, rules)
-                     or (any(rule.get("ai_auto") for rule in rules) and ai_url(target))):
+                     or (not inspection.url_allowed(host, target, rules)
+                         and any(rule.get("ai_auto") for rule in rules) and ai_url(target))):
             flow.response = blocked()
             return
     if not inspection.content_terms(rules):
+        before.stream = True
         return
     scan_response(flow, body=False)
-    if (flow.response is not before or not before.stream or not is_text_message(before)
-            or before.headers.get("content-encoding", "identity").lower() not in ("", "identity")):
+    if flow.response is not before:
         return
-    request = request_text(flow.request)
+    if not is_text_message(before):
+        before.stream = True
+        return
+    if not before.stream or before.headers.get("content-encoding", "identity").lower() not in ("", "identity"):
+        return
     header = response_text(before, b"")
     before.stream = inspection.StreamPrefix(3 * 65536, lambda prefix: inspection.matches_content(
-        [request, header + prefix], rules,
+        [header + prefix], rules,
     ))
 
 
 def response(flow):
-    if scans_content(flow.request) and not flow.response.stream:
+    if not flow.response.stream and scans_content(flow.request, inspection.groups.get()):
         scan_response(flow, body=True)
 
 
@@ -184,8 +201,9 @@ def response_text(reply, body):
 def websocket_message(flow):
     rules = inspection.groups.get()
     message = flow.websocket.messages[-1]
-    if inspection.content_terms(rules) and message.is_text and inspection.matches_content([
+    if (scans_content(flow.request, rules) and inspection.content_terms(rules) and message.is_text
+            and inspection.matches_content([
         request_text(flow.request), message.content[:inspection.MAX_BODY],
-    ], rules):
+    ], rules)):
         message.drop()
     del flow.websocket.messages[:-1]

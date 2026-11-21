@@ -158,9 +158,13 @@ def search_return_url(host, target):
     return ""
 
 
+def url_allowed(host, target, rules):
+    return any(de_patterns.any_match(rule.get("always_allow"), host)
+               or url_matches(rule.get("url_allow"), target) for rule in rules)
+
+
 def url_blocked(host, target, rules):
-    if any(de_patterns.any_match(rule.get("always_allow"), host)
-           or url_matches(rule.get("url_allow"), target) for rule in rules):
+    if url_allowed(host, target, rules):
         return False
     if any(de_patterns.any_match(rule.get("denied"), host)
            or url_matches(rule.get("url_denied"), target) for rule in rules):

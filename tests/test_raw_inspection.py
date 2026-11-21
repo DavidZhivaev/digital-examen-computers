@@ -30,17 +30,20 @@ with patch("builtins.open", side_effect=open_test_config):
 
 class RawInspectionTests(unittest.TestCase):
     def test_response_phrase_in_raw_http_body(self):
-        for body, status in ((b"ordinary page", b"200"), ("<p>САЙТ ЗАКРЫТ ОГРАНИЧЕНИЯМИ ШКОЛЫ</p>".encode(), b"403")):
+        phrase = "<p>САЙТ ЗАКРЫТ ОГРАНИЧЕНИЯМИ ШКОЛЫ</p>".encode()
+        for body, status, allowed in ((b"ordinary page", b"200", []), (phrase, b"403", []),
+                                      (phrase, b"200", ["*.1580.ru"])):
             with self.subTest(body=body):
                 client, browser = socket.socketpair()
                 upstream, origin = socket.socketpair()
                 with client, browser, upstream, origin:
                     origin.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
                                    b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
-                    data = b"GET / HTTP/1.1\r\nHost: example.org\r\n\r\n"
+                    data = b"GET / HTTP/1.1\r\nHost: sdo.1580.ru\r\n\r\n"
                     with patch.object(relay.de_inspection.groups, "get",
-                                      return_value=[{"request_deny": ["Сайт закрыт ограничениями школы"]}]):
-                        relay.inspect_http(client, upstream, data, "example.org", 80)
+                                      return_value=[{"request_deny": ["Сайт закрыт ограничениями школы"],
+                                                     "always_allow": allowed}]):
+                        relay.inspect_http(client, upstream, data, "sdo.1580.ru", 80)
                     client.shutdown(socket.SHUT_WR)
                     with browser.makefile("rb") as response:
                         page = response.read()
