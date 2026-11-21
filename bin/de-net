@@ -548,6 +548,7 @@ class Handler(socketserver.BaseRequestHandler):
         try:
             if port == 443 and inspect_tls:
                 upstream = socket.create_connection(("127.0.0.1", de_inspection.LISTEN_PORT), timeout=3)
+                upstream.settimeout(15)
                 try:
                     decision = b"X-Digital-Examen-Block: ai" if verdict == "ai_block" else b""
                     if de_upstream.tunnel(upstream, host, port, decision) != 200:
