@@ -142,20 +142,28 @@ def grab_wayland(login, session_id):
             os.chown(folder, entry.pw_uid, entry.pw_gid)
             env["XDG_CONFIG_HOME"] = folder
             env["XDG_CACHE_HOME"] = folder
-            shot = os.path.join(folder, "screen.bmp")
-            code, _ = de_common.run([
-                "/usr/bin/setpriv", "--reuid", str(entry.pw_uid), "--regid", str(entry.pw_gid),
-                "--init-groups", WAYLAND_SHOT, "-b", "-n", "-i", "-f", "-d", "0", "-o", shot,
-            ], GRAB_SECONDS, env)
-            if code:
-                return None
-            descriptor = os.open(shot, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            with os.fdopen(descriptor, "rb") as source:
-                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
-                    return None
-                return to_image(source.read(32 * 1024 * 1024))
+            formats = ("png",) if WAYLAND_ENV.get("png_only") == key else ("bmp", "png")
+            for image_format in formats:
+                shot = os.path.join(folder, "screen." + image_format)
+                code, _ = de_common.run([
+                    "/usr/bin/setpriv", "--reuid", str(entry.pw_uid), "--regid", str(entry.pw_gid),
+                    "--init-groups", WAYLAND_SHOT, "-b", "-n", "-i", "-f", "-d", "0", "-o", shot,
+                ], GRAB_SECONDS, env)
+                if code or not os.path.exists(shot):
+                    continue
+                descriptor = os.open(shot, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(descriptor, "rb") as source:
+                    details = os.fstat(source.fileno())
+                    if not stat.S_ISREG(details.st_mode) or details.st_size > 32 * 1024 * 1024:
+                        continue
+                    picture = to_image(source.read(32 * 1024 * 1024))
+                    if image_format == "png":
+                        WAYLAND_ENV["png_only"] = key
+                    return picture
     except (OSError, ValueError):
-        return None
+        pass
+    return None
+
 
 
 class Target:
@@ -363,6 +371,8 @@ class Senders:
         self.live_frame = None
         self.live_ready = threading.Condition()
         self.archive_ready = threading.Event()
+        self.archive_picture = None
+        self.archive_capture_ready = threading.Condition()
 
     def publish_live(self, body):
         with self.live_ready:
@@ -391,6 +401,37 @@ class Senders:
                 self.post(connection, body)
             except (OSError, ValueError):
                 pass
+
+    def publish_archive(self, key, login, picture):
+        with self.archive_capture_ready:
+            self.archive_picture = (key, login, picture)
+            self.archive_capture_ready.notify()
+
+    def build_archive(self):
+        storage = Stream("store", STORE_SIZE)
+        last_key = None
+        while True:
+            with self.archive_capture_ready:
+                self.archive_capture_ready.wait_for(lambda: self.archive_picture is not None)
+                key, login, picture = self.archive_picture
+                self.archive_picture = None
+            if not screen_enabled():
+                last_key = None
+                continue
+            if key != last_key:
+                storage.reset()
+                last_key = key
+            current, keyframe, pieces = storage.build(picture.resize(STORE_SIZE, Image.BILINEAR))
+            if not pieces:
+                continue
+            kept = remember(storage.body(login, keyframe, pieces), storage.frame_no)
+            storage.frame_no += 1
+            if kept:
+                storage.previous = current
+                storage.since_key = 0 if keyframe else storage.since_key + 1
+            else:
+                storage.reset()
+            self.archive_ready.set()
 
     def archive_loop(self):
         connection = FrameConnection(8)
@@ -434,10 +475,10 @@ def main():
     log("запись экрана запущена")
 
     live = Stream("live", LIVE_SIZE)
-    store = Stream("store", STORE_SIZE)
     senders = Senders()
     threading.Thread(target=senders.live_loop, daemon=True).start()
     threading.Thread(target=senders.archive_loop, daemon=True).start()
+    threading.Thread(target=senders.build_archive, daemon=True).start()
     next_store = 0.0
     next_live = 0.0
     previous_pixels, live_blob = b"", b""
@@ -460,8 +501,9 @@ def main():
             next_live = 0.0
         live_due = bool(watched and started >= next_live)
         store_due = started >= next_store
-        if not live_due and not store_due:
-            deadline = min(next_live, next_store) if watched else next_store
+        archive_near_live = bool(watched and not live_due and next_live - started < .9)
+        if not live_due and (not store_due or archive_near_live):
+            deadline = next_live if archive_near_live else (min(next_live, next_store) if watched else next_store)
             time.sleep(min(0.15, deadline - started))
             continue
         session = de_common.screen_session()
@@ -476,7 +518,6 @@ def main():
         key = session.get("Id", "") + "/" + login
         if key != last_key:
             senders.clear_live()
-            store.reset()
             next_store = next_live = 0.0
             previous_pixels, live_blob = b"", b""
             last_key = key
@@ -505,7 +546,7 @@ def main():
 
         if live_due:
             interval = LIVE_INTERVAL if watched == 1 else WATCH_INTERVAL
-            next_live = next_live + interval if next_live + interval > started else started + interval
+            next_live = started + interval
             pixels = picture.tobytes()
             if pixels != previous_pixels:
                 live_blob = webp(picture)
@@ -515,17 +556,7 @@ def main():
 
         if started >= next_store:
             next_store = started + STORE_INTERVAL
-            current, keyframe, pieces = store.build(picture.resize(STORE_SIZE, Image.BILINEAR))
-            if pieces:
-                stored_without_loss = remember(store.body(login, keyframe, pieces), store.frame_no)
-                senders.archive_ready.set()
-                store.frame_no += 1
-                if stored_without_loss:
-                    store.previous = current
-                    store.since_key = 0 if keyframe else store.since_key + 1
-                else:
-                    store.reset()
-
+            senders.publish_archive(key, login, picture)
 
 
 if __name__ == "__main__":
