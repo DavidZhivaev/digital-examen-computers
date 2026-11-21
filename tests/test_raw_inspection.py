@@ -114,22 +114,37 @@ class RawInspectionTests(unittest.TestCase):
         self.assertEqual(inspection.yandex_style_policy(inline_policy), inline_policy)
 
 
-    def test_yandex_embedded_ai_answer_is_removed_from_buffered_and_chunked_html(self):
+    def test_yandex_only_removes_complete_answer_nodes_and_keeps_the_results_shell(self):
         inspection = relay.de_inspection
         page = (
-            '<!doctype html><html><head></head><body>'
-            '<div class="FuturisSearchWrapper"><div>Скрытый ответ ИИ</div>'
-            '<img src="answer.png"><script>var ai="privateAnswer";</script></div>'
-            '<li class="serp-item__futuris-snippet">AI result</li>'
+            '<!doctype html><html><head></head><body><div class="FuturisSearchWrapper">'
+            '<li class="serp-item serp-item__futuris-snippet"><div>Скрытый ответ ИИ</div>'
+            '<script>var ai="privateAnswer";</script></li>'
             '<a class="HeaderNav-Tab" href="/search?promo=force_neuro">Алиса</a>'
-            '<a href="/ordinary">Обычная ссылка</a></body></html>'
+            '<a href="/ordinary">Обычная ссылка</a></div></body></html>'
         ).encode()
         buffered = inspection.filter_yandex_html(page)
         stream = inspection.YandexStyleStream(True)
         streamed = b"".join(stream(page[i:i + 7]) for i in range(0, len(page), 7)) + stream(b"")
         for result in (buffered, streamed):
             self.assertEqual(len(result), len(page) + len(inspection.YANDEX_STYLE_TAG))
-            self.assertNotIn("Скрытый ответ ИИ".encode(), result)
-            self.assertNotIn(b"privateAnswer", result)
-            self.assertNotIn(b"AI result", result)
             self.assertIn("Обычная ссылка".encode(), result)
+            self.assertIn(b'class="FuturisSearchWrapper"', result)
+        self.assertNotIn("Скрытый ответ ИИ".encode(), buffered)
+        self.assertNotIn(b"privateAnswer", buffered)
+        self.assertEqual(streamed.replace(inspection.YANDEX_STYLE_TAG, b"", 1), page)
+
+        malformed = b'<li class="serp-item serp-item__futuris-snippet"><a>ordinary results</a>'
+        self.assertIn(b"<a>ordinary results</a>", inspection.filter_yandex_html(malformed))
+
+    def test_body_mime_and_js_size_filter(self):
+        inspection = relay.de_inspection
+        for mime in ("text/html; charset=utf-8", "application/vnd.example+json",
+                     "application/xml", "application/xhtml+xml"):
+            self.assertEqual(inspection.body_scan_limit(mime), inspection.MAX_BODY)
+        for mime in ("text/css", "image/svg+xml", "application/pdf", "text/plain"):
+            self.assertEqual(inspection.body_scan_limit(mime, 100), 0)
+        self.assertEqual(inspection.body_scan_limit("application/javascript", "32768"), 32768)
+        self.assertEqual(inspection.body_scan_limit("text/javascript", "32769"), 0)
+        self.assertEqual(inspection.body_scan_limit("text/javascript"), 0)
+        self.assertEqual(inspection.text_prefix(gzip.compress(b"x" * 32769), "gzip", 32768), b"")

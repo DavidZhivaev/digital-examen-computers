@@ -177,15 +177,36 @@ def url_blocked(host, target, rules):
     return any(rule.get("principle") == "allow" for rule in rules)
 
 
-def text_prefix(data, encoding):
-    if not data:
+JS_LIMIT = 32 * 1024
+JS_TYPES = frozenset({"application/javascript", "text/javascript", "application/ecmascript",
+                      "text/ecmascript", "application/x-javascript"})
+
+
+def body_scan_limit(content_type, length=None):
+    mime = content_type.partition(";")[0].strip().lower()
+    if (mime in {"text/html", "application/json", "text/json", "application/x-ndjson", "application/xml", "text/xml"}
+            or mime.endswith(("+json", "+xml")) and not mime.startswith("image/")):
+        return MAX_BODY
+    if mime in JS_TYPES and length is not None:
+        try:
+            if 0 < int(length) <= JS_LIMIT:
+                return JS_LIMIT
+        except (TypeError, ValueError):
+            pass
+    return 0
+
+
+def text_prefix(data, encoding, limit=MAX_BODY):
+    if not data or not limit:
         return b""
+    javascript = limit == JS_LIMIT
     if encoding in ("", "identity"):
-        return data[:MAX_BODY]
+        return b"" if javascript and len(data) > limit else data[:limit]
     if encoding in ("gzip", "deflate"):
         try:
             bits = 31 if encoding == "gzip" else 15
-            return zlib.decompressobj(bits).decompress(data[:MAX_BODY], MAX_BODY)
+            decoded = zlib.decompressobj(bits).decompress(data[:MAX_BODY], limit + int(javascript))
+            return b"" if javascript and len(decoded) > limit else decoded
         except zlib.error:
             return b""
     return b""
@@ -216,7 +237,7 @@ def google_web_search_path(host, path):
 YANDEX_SEARCH_HOSTS = frozenset({"ya.ru", "www.ya.ru", "yandex.ru", "www.yandex.ru",
                                 "yandex.com", "www.yandex.com"})
 YANDEX_SEARCH_STYLE = (
-    b'.FuturisSearchWrapper,.serp-item__futuris-snippet,'
+    b'li.serp-item.serp-item__futuris-snippet,'
     b'a.HeaderNav-Tab[href*="promo=force_neuro"]{display:none!important}'
 )
 YANDEX_STYLE_TAG = b"<style>" + YANDEX_SEARCH_STYLE + b"</style>"
@@ -257,64 +278,60 @@ def insert_yandex_style(html_body):
 
 
 class YandexResultFilter(HTMLParser):
-    def __init__(self):
+    def __init__(self, source):
         super().__init__(convert_charrefs=False)
-        self.output = bytearray()
-        self.hidden_tag = None
+        self.source = source.decode("latin-1")
+        self.lines = [0, *(match.end() for match in re.finditer("\n", self.source))]
+        self.target = None
         self.depth = 0
-        self.mask_token = False
+        self.ranges = []
 
-    def is_ai_element(self, tag, attrs):
-        attributes = dict(attrs)
-        classes = set((attributes.get("class") or "").split())
-        if classes & {"FuturisSearchWrapper", "serp-item__futuris-snippet"}:
-            return True
-        return (tag == "a" and "HeaderNav-Tab" in classes
-                and "promo=force_neuro" in (attributes.get("href") or ""))
+    def source_offset(self):
+        line, column = self.getpos()
+        return self.lines[line - 1] + column
 
     def handle_starttag(self, tag, attrs):
-        if self.depth:
-            if tag == self.hidden_tag:
+        if self.target is not None:
+            if tag == self.target[0]:
                 self.depth += 1
-        elif self.is_ai_element(tag, attrs):
-            if tag in {"area", "base", "br", "col", "embed", "hr", "img", "input",
-                       "link", "meta", "param", "source", "track", "wbr"}:
-                self.mask_token = True
-            else:
-                self.hidden_tag = tag
-                self.depth = 1
+            return
+        if tag not in {"a", "li"}:
+            return
+        attributes = dict(attrs)
+        classes = set((attributes.get("class") or "").split())
+        snippet = tag == "li" and {"serp-item", "serp-item__futuris-snippet"} <= classes
+        tab = (tag == "a" and "HeaderNav-Tab" in classes
+               and "promo=force_neuro" in (attributes.get("href") or ""))
+        if snippet or tab:
+            self.target = (tag, self.source_offset())
+            self.depth = 1
 
     def handle_startendtag(self, tag, attrs):
-        self.mask_token = self.is_ai_element(tag, attrs)
+        pass
 
     def handle_endtag(self, tag):
-        if self.depth and tag == self.hidden_tag:
-            self.depth -= 1
-            self.mask_token = True
-
-    def updatepos(self, start, end):
-        if end > start:
-            if self.depth or self.mask_token:
-                self.output.extend(b" " * (end - start))
-            else:
-                self.output.extend(self.rawdata[start:end].encode("latin-1"))
-            self.mask_token = False
-        return super().updatepos(start, end)
-
-    def filter_chunk(self, data, final=False):
-        self.feed(data.decode("latin-1"))
-        if final:
-            self.close()
-            if self.rawdata:
-                self.updatepos(0, len(self.rawdata))
-                self.rawdata = ""
-        output = bytes(self.output)
-        self.output.clear()
-        return output
+        if self.target is None or tag != self.target[0]:
+            return
+        self.depth -= 1
+        if not self.depth:
+            start = self.target[1]
+            end = self.source.find(">", self.source_offset()) + 1
+            if 0 < end - start <= JS_LIMIT:
+                self.ranges.append((start, end))
+            self.target = None
 
 
 def filter_yandex_html(body):
-    return insert_yandex_style(YandexResultFilter().filter_chunk(body, final=True))
+    parser = YandexResultFilter(body)
+    try:
+        parser.feed(parser.source)
+        parser.close()
+    except (AssertionError, ValueError):
+        return insert_yandex_style(body)
+    output = bytearray(body)
+    for start, end in parser.ranges:
+        output[start:end] = b" " * (end - start)
+    return insert_yandex_style(bytes(output))
 
 
 class YandexStyleStream:
@@ -322,11 +339,9 @@ class YandexStyleStream:
         self.inner = inner
         self.pending = bytearray()
         self.done = False
-        self.filter = YandexResultFilter()
 
     def __call__(self, chunk):
         data = self.inner(chunk) if callable(self.inner) else chunk
-        data = self.filter.filter_chunk(data, final=not chunk)
         if self.done:
             return data
         self.pending.extend(data)

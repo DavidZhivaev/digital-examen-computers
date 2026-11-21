@@ -52,17 +52,17 @@ def request_text(request):
     return inspection.message_text(first, fields, text_body(request))
 
 
-def is_text_message(message):
-    content_type = message.headers.get("content-type", "").lower()
-    return content_type.startswith("text/") or any(
-        kind in content_type for kind in ("json", "xml", "javascript", "x-www-form-urlencoded")
-    )
+def scan_limit(message):
+    length = message.headers.get("content-length")
+    if length is None and message.raw_content is not None:
+        length = len(message.raw_content)
+    return inspection.body_scan_limit(message.headers.get("content-type", ""), length)
 
 
 def text_body(message):
     return inspection.text_prefix(
-        message.raw_content, message.headers.get("content-encoding", "identity").lower()
-    ) if is_text_message(message) else b""
+        message.raw_content, message.headers.get("content-encoding", "identity").lower(), scan_limit(message)
+    )
 
 
 def ai_url(url):
@@ -145,7 +145,9 @@ def request(flow):
         if inspection.matches_content([request_text(request)], rules):
             flow.response = blocked()
             return
-        request.anticomp()
+        if request.headers.get("sec-fetch-dest", "") not in (
+                "style", "font", "image", "audio", "video", "script", "track"):
+            request.anticomp()
     if ai_enabled and request.method == "GET":
         if inspection.yandex_search(request.host, request.path):
             flow.metadata["de_yandex_search"] = True
@@ -173,18 +175,21 @@ def responseheaders(flow):
             flow.response = blocked()
             return
     if not inspection.content_terms(rules):
-        before.stream = True
-        stream_yandex_style(flow)
+        if not yandex_html(flow) or before.stream or not small_yandex_page(before):
+            before.stream = True
+            stream_yandex_style(flow)
         return
     scan_response(flow, body=False)
     if flow.response is not before:
         return
-    if not is_text_message(before):
+    limit = scan_limit(before)
+    if not limit:
         before.stream = True
         return
     if before.stream and before.headers.get("content-encoding", "identity").lower() in ("", "identity"):
         header = response_text(before, b"")
-        before.stream = inspection.StreamPrefix(3 * 65536, lambda prefix: inspection.matches_content(
+        limit = inspection.JS_LIMIT if limit == inspection.JS_LIMIT else 3 * 65536
+        before.stream = inspection.StreamPrefix(limit, lambda prefix: inspection.matches_content(
             [header + prefix], rules,
         ))
         stream_yandex_style(flow)
@@ -196,6 +201,11 @@ def yandex_html(flow):
             and reply.headers.get("content-type", "").lower().split(";", 1)[0].strip() == "text/html"
             and reply.headers.get("content-encoding", "identity").lower() in ("", "identity")
             and reply.headers.get("content-length") != "0")
+
+
+def small_yandex_page(reply):
+    length = reply.headers.get("content-length", "")
+    return length.isdecimal() and 0 < int(length) <= inspection.MAX_BODY
 
 
 def add_yandex_style_headers(reply):
@@ -224,7 +234,10 @@ def response(flow):
         scan_response(flow, body=True)
         if flow.response is before and yandex_html(flow) and before.raw_content:
             add_yandex_style_headers(before)
-            before.raw_content = inspection.filter_yandex_html(before.raw_content)
+            if len(before.raw_content) <= inspection.MAX_BODY:
+                before.raw_content = inspection.filter_yandex_html(before.raw_content)
+            else:
+                before.raw_content = inspection.insert_yandex_style(before.raw_content)
 
 
 def scan_response(flow, body):

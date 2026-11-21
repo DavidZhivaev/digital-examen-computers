@@ -446,7 +446,13 @@ def inspect_http(client, upstream, data, host, port):
     method, target, version = first.split()
     url = target.decode("ascii")
     scan = not de_inspection.url_allowed(host, url, rules) and bool(de_inspection.content_terms(rules))
-    if de_inspection.url_blocked(host, url, rules) or (scan and de_inspection.matches_content([head, body], rules)):
+    request_fields = {key.lower(): value.strip() for key, _, value in
+                      (line.partition(b":") for line in headers)}
+    checked_body = de_inspection.text_prefix(
+        body, request_fields.get(b"content-encoding", b"identity").decode("latin-1").lower(),
+        de_inspection.body_scan_limit(request_fields.get(b"content-type", b"").decode("latin-1"), len(body)),
+    ) if scan else b""
+    if de_inspection.url_blocked(host, url, rules) or (scan and de_inspection.matches_content([head, checked_body], rules)):
         client.sendall(blocked_response())
         return True
     path = target[len(b"http://" + de_upstream.authority(host, port).encode("ascii")):]
@@ -467,14 +473,14 @@ def inspect_http(client, upstream, data, host, port):
         prefix = b""
         if scan:
             response_headers = "\r\n".join("%s: %s" % field for field in fields)
-            content_type = reply.headers.get_content_type()
+            limit = de_inspection.body_scan_limit(reply.headers.get("Content-Type", ""),
+                                                  reply.headers.get("Content-Length"))
             encoding = reply.headers.get("Content-Encoding", "identity").lower()
-            text = content_type.startswith("text/") or content_type.endswith(("json", "xml", "javascript"))
-            if text:
-                prefix = reply.read(de_inspection.MAX_BODY)
+            if limit:
+                prefix = reply.read(limit)
             if de_inspection.matches_content(
-                    [head, body, (status + "\r\n" + response_headers).encode("latin-1"),
-                     de_inspection.text_prefix(prefix, encoding)], rules):
+                    [head, checked_body, (status + "\r\n" + response_headers).encode("latin-1"),
+                     de_inspection.text_prefix(prefix, encoding, limit)], rules):
                 client.sendall(blocked_response())
                 return True
         excluded = {"connection", "transfer-encoding", "trailer", "upgrade", "keep-alive"}
@@ -491,7 +497,7 @@ def inspect_http(client, upstream, data, host, port):
         client.sendall("\r\n".join([status, *headers, "Connection: close", "", ""]).encode("latin-1"))
         client.sendall(prefix)
         while True:
-            chunk = reply.read(65536)
+            chunk = reply.read1(65536)
             if not chunk:
                 break
             client.sendall(chunk)
