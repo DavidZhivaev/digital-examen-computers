@@ -73,7 +73,8 @@ def xauth_files(login, display):
 
 def to_image(data):
     picture = Image.open(io.BytesIO(data))
-    picture = picture.convert("RGB")
+    if picture.mode != "RGB":
+        picture = picture.convert("RGB")
     if picture.size != LIVE_SIZE:
         picture = picture.resize(LIVE_SIZE, Image.BILINEAR)
     return picture
@@ -120,25 +121,31 @@ def set_display_scale(session):
         de_common.run(command + changes, 4, env)
 
 
-def grab_wayland(login):
+WAYLAND_ENV = {}
+
+
+def grab_wayland(login, session_id):
     try:
         entry = pwd.getpwnam(login)
     except KeyError:
         return None
-    values = de_common.user_env(entry.pw_uid, "WAYLAND_DISPLAY")
-    if not values:
-        return None
-    env = de_common.session_env(entry, values)
-    env["QT_QPA_PLATFORM"] = "wayland"
+    key = (entry.pw_uid, session_id)
+    now = time.monotonic()
+    if WAYLAND_ENV.get("key") != key or now >= WAYLAND_ENV.get("expires", 0):
+        values = de_common.user_env(entry.pw_uid, "WAYLAND_DISPLAY")
+        if not values:
+            return None
+        WAYLAND_ENV.update(key=key, expires=now + 15, env=de_common.session_env(entry, values))
+    env = dict(WAYLAND_ENV["env"], QT_QPA_PLATFORM="wayland")
     try:
         with tempfile.TemporaryDirectory(dir=WORK_DIR) as folder:
             os.chown(folder, entry.pw_uid, entry.pw_gid)
             env["XDG_CONFIG_HOME"] = folder
             env["XDG_CACHE_HOME"] = folder
-            shot = os.path.join(folder, "screen.png")
+            shot = os.path.join(folder, "screen.bmp")
             code, _ = de_common.run([
                 "/usr/bin/setpriv", "--reuid", str(entry.pw_uid), "--regid", str(entry.pw_gid),
-                "--init-groups", WAYLAND_SHOT, "-b", "-n", "-i", "-f", "-o", shot,
+                "--init-groups", WAYLAND_SHOT, "-b", "-n", "-i", "-f", "-d", "0", "-o", shot,
             ], GRAB_SECONDS, env)
             if code:
                 return None
@@ -165,7 +172,7 @@ TARGET = Target()
 def grab(session):
     login = session.get("Name", "")
     if session.get("Type") == "wayland" and session.get("Class") != "greeter":
-        return grab_wayland(login)
+        return grab_wayland(login, session.get("Id", ""))
 
     key = session.get("Id", "")
     if TARGET.key == key and TARGET.display:
@@ -187,7 +194,7 @@ def grab(session):
                 return picture
     TARGET.key = ""
     if session.get("Type") == "wayland":
-        return grab_wayland(login)
+        return grab_wayland(login, session.get("Id", ""))
     return None
 
 
@@ -454,7 +461,8 @@ def main():
         live_due = bool(watched and started >= next_live)
         store_due = started >= next_store
         if not live_due and not store_due:
-            time.sleep(0.15)
+            deadline = min(next_live, next_store) if watched else next_store
+            time.sleep(min(0.15, deadline - started))
             continue
         session = de_common.screen_session()
         if session is None or session.get("Class") == "greeter":
@@ -497,7 +505,7 @@ def main():
 
         if live_due:
             interval = LIVE_INTERVAL if watched == 1 else WATCH_INTERVAL
-            next_live = max(next_live + interval, started + interval)
+            next_live = next_live + interval if next_live + interval > started else started + interval
             pixels = picture.tobytes()
             if pixels != previous_pixels:
                 live_blob = webp(picture)
