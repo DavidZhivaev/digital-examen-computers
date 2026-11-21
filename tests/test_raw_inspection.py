@@ -8,7 +8,7 @@ import gzip
 import socket
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "pylib"))
@@ -29,6 +29,26 @@ with patch("builtins.open", side_effect=open_test_config):
 
 
 class RawInspectionTests(unittest.TestCase):
+    def test_origin_transport_accepts_only_the_inspector_side(self):
+        handler = relay.InspectionOrigin.__new__(relay.InspectionOrigin)
+        handler.client_address = ("127.0.0.1", 39000)
+        handler.request = Mock()
+        with patch.object(relay, "owner_of", return_value="") as owner:
+            handler.handle()
+        owner.assert_called_once_with(handler.client_address, {0}, "0100007F:%04X" % relay.de_inspection.ORIGIN_PORT)
+        handler.request.settimeout.assert_not_called()
+
+        upstream, origin = socket.socketpair()
+        with upstream, origin:
+            with patch.object(relay, "owner_of", return_value="root"), \
+                    patch.object(relay, "read_hello", return_value=b"CONNECT sdo.1580.ru:443 HTTP/1.1\r\n\r\n"), \
+                    patch.object(relay, "connect_web", return_value=upstream) as connect, \
+                    patch.object(relay, "bridge") as bridge:
+                handler.handle()
+        connect.assert_called_once_with("sdo.1580.ru", 443, False, timeout=4)
+        handler.request.sendall.assert_called_once_with(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        bridge.assert_called_once_with(handler.request, upstream)
+
     def test_response_phrase_in_raw_http_body(self):
         phrase = "<p>САЙТ ЗАКРЫТ ОГРАНИЧЕНИЯМИ ШКОЛЫ</p>".encode()
         for body, status, allowed in ((b"ordinary page", b"200", []), (phrase, b"403", []),

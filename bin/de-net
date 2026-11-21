@@ -99,14 +99,14 @@ table inet %(table)s {
         ip6 daddr ::1 tcp dport %(proxy)d accept
         ip daddr 127.0.0.1 udp dport %(dns)d accept
         ip6 daddr ::1 udp dport %(dns)d accept
-        tcp dport %(inspect)d reject with tcp reset
+        tcp dport { %(inspect)d, %(origin)d } reject with tcp reset
         oifname "lo" accept
         meta l4proto tcp reject with tcp reset
         reject
     }
 }
 """ % {"table": TABLE, "proxy": PROXY_PORT, "dns": DNS_PORT,
-        "inspect": de_inspection.LISTEN_PORT, "users": users})
+        "inspect": de_inspection.LISTEN_PORT, "origin": de_inspection.ORIGIN_PORT, "users": users})
     EXPECTED_RULES = installed_rules() if ok else None
     return ok
 
@@ -283,7 +283,7 @@ def note_block(host, login, group):
     note("block", host + " - " + group if group else host, login)
 
 
-def owner_of(address):
+def owner_of(address, permitted=None, destination=None):
     ip, port = address[:2]
     family = socket.AF_INET6 if ":" in ip else socket.AF_INET
     packed = socket.inet_pton(family, ip)
@@ -294,11 +294,11 @@ def owner_of(address):
         with open(path) as entries:
             for line in entries:
                 fields = line.split()
-                if len(fields) < 8 or fields[1] != wanted:
+                if len(fields) < 8 or fields[1] != wanted or (destination and fields[2] != destination):
                     continue
                 try:
                     uid = int(fields[7])
-                    if uid in PEOPLE:
+                    if uid in (PEOPLE if permitted is None else permitted):
                         return pwd.getpwuid(uid).pw_name
                     return ""
                 except (KeyError, ValueError):
@@ -389,6 +389,15 @@ def pipe(source, target):
         target.shutdown(socket.SHUT_WR)
     except OSError:
         pass
+
+
+def bridge(client, upstream):
+    client.settimeout(None)
+    upstream.settimeout(None)
+    other = threading.Thread(target=pipe, args=(client, upstream), daemon=True)
+    other.start()
+    pipe(upstream, client)
+    other.join(timeout=5)
 
 
 def proxy_target(data):
@@ -584,20 +593,39 @@ class Handler(socketserver.BaseRequestHandler):
             except (OSError, ValueError, http.client.HTTPException):
                 pass
             return
-        client.settimeout(None)
-        upstream.settimeout(None)
-        try:
-            if data:
-                upstream.sendall(data)
-            note("site", de_inspection.host_name(host), login)
-        except OSError:
-            upstream.close()
+        with upstream:
+            try:
+                if data:
+                    upstream.sendall(data)
+                note("site", de_inspection.host_name(host), login)
+                bridge(client, upstream)
+            except OSError:
+                return
+
+
+class InspectionOrigin(socketserver.BaseRequestHandler):
+    def handle(self):
+        destination = "0100007F:%04X" % de_inspection.ORIGIN_PORT
+        if not owner_of(self.client_address, {0}, destination):
             return
-        other = threading.Thread(target=pipe, args=(client, upstream), daemon=True)
-        other.start()
-        pipe(upstream, client)
-        other.join(timeout=5)
-        upstream.close()
+        client = self.request
+        client.settimeout(5)
+        try:
+            target = proxy_target(read_hello(client))
+            if not target or not target[3] or target[2]:
+                return
+        except (UnicodeError, ValueError, OSError):
+            return
+        host, port, _, _ = target
+        try:
+            with connect_web(host, port, False, timeout=4) as upstream:
+                client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                bridge(client, upstream)
+        except OSError:
+            try:
+                client.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
 
 
 class Server(socketserver.ThreadingTCPServer):
@@ -699,6 +727,7 @@ def main():
         return 0
 
     server = Server(("127.0.0.1", PROXY_PORT), Handler)
+    origin = Server(("127.0.0.1", de_inspection.ORIGIN_PORT), InspectionOrigin)
     ipv4_dns = dns_listener(socket.AF_INET, "127.0.0.1")
     threading.Thread(target=dns_loop, args=(ipv4_dns,), daemon=True).start()
     try:
@@ -715,6 +744,7 @@ def main():
         return 1
     if not relay_route(True):
         log("не удалось настроить прямой маршрут веб-реле")
+    threading.Thread(target=origin.serve_forever, daemon=True).start()
     threading.Thread(target=people_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     notification = os.environ.get("NOTIFY_SOCKET")

@@ -14,6 +14,7 @@ import de_patterns
 HOSTS_FILE = Path("/etc/digital-examen/inspect-hosts")
 POLICY_FILE = Path("/var/lib/digital-examen/policy.json")
 LISTEN_PORT = 3130
+ORIGIN_PORT = 3140
 MAX_BODY = 131072
 
 
