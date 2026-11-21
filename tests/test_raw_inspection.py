@@ -87,3 +87,28 @@ class RawInspectionTests(unittest.TestCase):
         self.assertTrue(relay.de_inspection.matches_content(
             [br"\u041d\u043e\u0432\u044b\u0439 \u0447\u0430\u0442"], rules
         ))
+
+
+    def test_google_web_search_preserves_query_and_specialized_tabs(self):
+        rewrite = relay.de_inspection.google_web_search_path
+        self.assertEqual(rewrite("www.google.com", "/search?q=погода&hl=ru"),
+                         "/search?q=%D0%BF%D0%BE%D0%B3%D0%BE%D0%B4%D0%B0&hl=ru&udm=14")
+        for path in ("/search?q=weather&udm=14", "/search?q=weather&udm=2",
+                     "/search?q=weather&udm=50", "/search?q=weather&tbm=isch", "/settings"):
+            self.assertEqual(rewrite("www.google.com", path), path)
+        self.assertEqual(rewrite("google.com.example.org", "/search?q=weather"), "/search?q=weather")
+
+
+    def test_yandex_styles_are_added_once_after_the_doctype_without_relaxing_scripts(self):
+        inspection = relay.de_inspection
+        stream = inspection.YandexStyleStream(True)
+        page = stream(b"<!doc") + stream(b"type html><html>") + stream(b"<body>links") + stream(b"")
+        self.assertTrue(page.startswith(b"<!doctype html><style>"))
+        self.assertEqual(page.count(inspection.YANDEX_STYLE_TAG), 1)
+        self.assertIn(b"<body>links", page)
+        policy = "default-src 'self'; script-src 'none'; style-src 'none'"
+        result = inspection.yandex_style_policy(policy)
+        self.assertIn("script-src 'none'", result)
+        self.assertTrue(result.endswith("style-src-elem " + inspection.YANDEX_STYLE_HASH))
+        inline_policy = "style-src 'unsafe-inline'; script-src 'none'"
+        self.assertEqual(inspection.yandex_style_policy(inline_policy), inline_policy)

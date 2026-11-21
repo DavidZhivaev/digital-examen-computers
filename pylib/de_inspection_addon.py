@@ -74,8 +74,9 @@ def ai_url(url):
         host = host[4:]
     if host in {"ya.ru", "yandex.ru", "yandex.com", "alice.yandex.ru", "alice.yandex.com"}:
         return (host.startswith("alice.") or path == "/alice" or path.startswith("/alice/")
-                or (path == "/search" and bool(set(query.get("mode", ())) & {"ai", "alice", "neuro"})))
-    if re.fullmatch(r"google\.(?:com|[a-z]{2}|(?:com|co)\.[a-z]{2})", host):
+                or (path == "/search" and (bool(set(query.get("mode", ())) & {"ai", "alice", "neuro"})
+                     or "force_neuro" in query.get("promo", ()))))
+    if inspection.google_search_host(host):
         return path in {"/ai", "/aimode"} or (path == "/search" and "50" in query.get("udm", ()))
     return host in {"gemini.google.com", "aistudio.google.com"}
 
@@ -136,14 +137,24 @@ def request(flow):
         return
     if not scans_content(request, rules):
         return
-    if any(rule.get("ai_auto") for rule in rules) and ai_request(request):
+    ai_enabled = any(rule.get("ai_auto") for rule in rules)
+    if ai_enabled and ai_request(request):
         flow.response = blocked()
         return
     if inspection.content_terms(rules):
         if inspection.matches_content([request_text(request)], rules):
             flow.response = blocked()
-        else:
+            return
+        request.anticomp()
+    if ai_enabled and request.method == "GET":
+        if inspection.yandex_search(request.host, request.path):
+            flow.metadata["de_yandex_search"] = True
             request.anticomp()
+            request.headers.pop("if-none-match", None)
+            request.headers.pop("if-modified-since", None)
+        path = inspection.google_web_search_path(request.host, request.path)
+        if path != request.path:
+            request.path = path
 
 
 def responseheaders(flow):
@@ -163,6 +174,7 @@ def responseheaders(flow):
             return
     if not inspection.content_terms(rules):
         before.stream = True
+        stream_yandex_style(flow)
         return
     scan_response(flow, body=False)
     if flow.response is not before:
@@ -170,17 +182,49 @@ def responseheaders(flow):
     if not is_text_message(before):
         before.stream = True
         return
-    if not before.stream or before.headers.get("content-encoding", "identity").lower() not in ("", "identity"):
-        return
-    header = response_text(before, b"")
-    before.stream = inspection.StreamPrefix(3 * 65536, lambda prefix: inspection.matches_content(
-        [header + prefix], rules,
-    ))
+    if before.stream and before.headers.get("content-encoding", "identity").lower() in ("", "identity"):
+        header = response_text(before, b"")
+        before.stream = inspection.StreamPrefix(3 * 65536, lambda prefix: inspection.matches_content(
+            [header + prefix], rules,
+        ))
+        stream_yandex_style(flow)
+
+
+def yandex_html(flow):
+    reply = flow.response
+    return (flow.metadata.get("de_yandex_search") and reply.status_code == 200
+            and reply.headers.get("content-type", "").lower().split(";", 1)[0].strip() == "text/html"
+            and reply.headers.get("content-encoding", "identity").lower() in ("", "identity")
+            and reply.headers.get("content-length") != "0")
+
+
+def add_yandex_style_headers(reply):
+    key = "content-security-policy"
+    values = reply.headers.get_all(key)
+    if values:
+        reply.headers.set_all(key, [", ".join(inspection.yandex_style_policy(policy)
+                                               for policy in value.split(",")) for value in values])
+    length = reply.headers.get("content-length")
+    if length and length.isdecimal():
+        reply.headers["content-length"] = str(int(length) + len(inspection.YANDEX_STYLE_TAG))
+    reply.headers["cache-control"] = "no-store"
+    for key in ("etag", "content-md5", "digest"):
+        reply.headers.pop(key, None)
+
+
+def stream_yandex_style(flow):
+    if yandex_html(flow):
+        add_yandex_style_headers(flow.response)
+        flow.response.stream = inspection.YandexStyleStream(flow.response.stream)
 
 
 def response(flow):
-    if not flow.response.stream and scans_content(flow.request, inspection.groups.get()):
+    before = flow.response
+    if not before.stream and scans_content(flow.request, inspection.groups.get()):
         scan_response(flow, body=True)
+        if flow.response is before and yandex_html(flow) and before.raw_content:
+            add_yandex_style_headers(before)
+            before.raw_content = inspection.insert_yandex_style(before.raw_content)
 
 
 def scan_response(flow, body):

@@ -1,11 +1,12 @@
 import base64
 import binascii
+import hashlib
 import json
 from pathlib import Path
 import zlib
 import html
 import re
-from urllib.parse import parse_qs, unquote_plus, urlsplit
+from urllib.parse import parse_qs, parse_qsl, unquote_plus, urlencode, urlsplit
 
 import de_patterns
 
@@ -187,3 +188,85 @@ def text_prefix(data, encoding):
         except zlib.error:
             return b""
     return b""
+
+
+def google_search_host(host):
+    host = host_name(host)
+    if host.startswith("www."):
+        host = host[4:]
+    return bool(re.fullmatch(r"google\.(?:com|[a-z]{2}|(?:com|co)\.[a-z]{2})", host))
+
+
+def google_web_search_path(host, path):
+    if not google_search_host(host):
+        return path
+    parts = urlsplit(path)
+    if parts.path.rstrip("/") != "/search":
+        return path
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    params = dict(query)
+    if not params.get("q") or params.get("tbm") or any(
+            key == "udm" and value not in ("", "0") for key, value in query):
+        return path
+    query = [(key, value) for key, value in query if key != "udm"]
+    return parts._replace(query=urlencode([*query, ("udm", "14")])).geturl()
+
+
+YANDEX_SEARCH_HOSTS = frozenset({"ya.ru", "www.ya.ru", "yandex.ru", "www.yandex.ru",
+                                "yandex.com", "www.yandex.com"})
+YANDEX_SEARCH_STYLE = (
+    b'.FuturisSearchWrapper,.serp-item__futuris-snippet,'
+    b'a.HeaderNav-Tab[href*="promo=force_neuro"]{display:none!important}'
+)
+YANDEX_STYLE_TAG = b"<style>" + YANDEX_SEARCH_STYLE + b"</style>"
+YANDEX_STYLE_HASH = "'sha256-" + base64.b64encode(hashlib.sha256(YANDEX_SEARCH_STYLE).digest()).decode() + "'"
+
+
+def yandex_search(host, path):
+    return host_name(host) in YANDEX_SEARCH_HOSTS and urlsplit(path).path.rstrip("/") == "/search"
+
+
+def yandex_style_policy(policy):
+    directives = [item.strip().split() for item in policy.split(";") if item.strip()]
+    for name in ("style-src-elem", "style-src", "default-src"):
+        tokens = next((item for item in directives if item[0].lower() == name), None)
+        if tokens is None:
+            continue
+        if YANDEX_STYLE_HASH in tokens[1:]:
+            return policy
+        if ("'unsafe-inline'" in tokens[1:]
+                and not any(token.startswith(("'nonce-", "'sha256-", "'sha384-", "'sha512-"))
+                            for token in tokens[1:])):
+            return policy
+        element_style = ["style-src-elem", *(token for token in tokens[1:] if token != "'none'"),
+                         YANDEX_STYLE_HASH]
+        if name == "style-src-elem":
+            tokens[:] = element_style
+        else:
+            directives.append(element_style)
+        return "; ".join(" ".join(item) for item in directives)
+    return policy
+
+
+def insert_yandex_style(html_body):
+    head = re.search(br"<head(?:\s[^<>]*)?>", html_body[:4096], re.I)
+    doctype = re.match(br"\s*<!doctype[^>]*>", html_body[:4096], re.I)
+    index = head.end() if head else doctype.end() if doctype else 0
+    return html_body[:index] + YANDEX_STYLE_TAG + html_body[index:]
+
+
+class YandexStyleStream:
+    def __init__(self, inner):
+        self.inner = inner
+        self.pending = bytearray()
+        self.done = False
+
+    def __call__(self, chunk):
+        data = self.inner(chunk) if callable(self.inner) else chunk
+        if self.done:
+            return data
+        self.pending.extend(data)
+        if chunk and b">" not in self.pending and len(self.pending) < 512:
+            return b""
+        self.done = True
+        return insert_yandex_style(bytes(self.pending)) if self.pending else b""
