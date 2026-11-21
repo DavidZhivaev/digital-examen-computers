@@ -3,6 +3,7 @@ from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
 from io import StringIO
 from builtins import open as real_open
+import base64
 import gzip
 import socket
 import sys
@@ -61,3 +62,15 @@ class RawInspectionTests(unittest.TestCase):
         self.assertTrue(relay.de_inspection.matches_content([encoded], rules))
         prefix = relay.de_inspection.text_prefix(compressed, "gzip")
         self.assertTrue(relay.de_inspection.matches_content([prefix], rules))
+
+
+    def test_search_challenge_inherits_only_the_matching_yandex_search_rule(self):
+        rules = [{"principle": "allow", "url_allow": ["yandex.ru/search*"]}]
+        for original, blocked in (
+            ("https://yandex.ru/search?text=321", False),
+            ("https://yandex.ru/alice/", True),
+            ("https://external.example/search?text=321", True),
+        ):
+            encoded = base64.urlsafe_b64encode(original.encode()).decode().rstrip("=")
+            challenge = "https://yandex.ru/showcaptcha?retpath=" + encoded + "_" + "f" * 32
+            self.assertEqual(relay.de_inspection.url_blocked("yandex.ru", challenge, rules), blocked)
