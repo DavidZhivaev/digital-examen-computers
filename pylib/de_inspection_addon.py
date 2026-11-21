@@ -1,5 +1,10 @@
+import asyncio
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 import json
 import re
+import time
 
 from mitmproxy import http
 from urllib.parse import parse_qs, urljoin, urlsplit
@@ -37,6 +42,10 @@ def scans_content(request, rules):
 
 
 AI_BLOCKED_CONNECTIONS = set()
+SCAN_TIMEOUT = 0.3
+SCAN_WORKERS = ThreadPoolExecutor(max_workers=2)
+SCAN_PENDING = set()
+DEFERRED_BLOCKS = OrderedDict()
 
 
 def client_disconnected(client):
@@ -147,6 +156,10 @@ def request(flow):
         return
     if not scans_content(request, rules):
         return
+    cached = DEFERRED_BLOCKS.get(scan_key(request))
+    if cached and cached[0] > time.monotonic() and cached[1] == inspection.content_terms(rules):
+        flow.response = blocked()
+        return
     if ai_enabled and ai_request(request):
         flow.response = blocked()
         return
@@ -188,8 +201,8 @@ def responseheaders(flow):
             before.stream = True
             stream_yandex_style(flow)
         return
-    scan_response(flow, body=False)
-    if flow.response is not before:
+    if inspection.matches_content([response_text(before, b"")], rules):
+        block_response_headers(flow)
         return
     limit = scan_limit(before)
     if not limit:
@@ -243,10 +256,12 @@ def stream_yandex_style(flow, inner=True):
         flow.response.stream = inspection.stream_chunks(inspection.YandexStyleStream(inner))
 
 
-def response(flow):
+async def response(flow):
     before = flow.response
-    if not before.stream and scans_content(flow.request, inspection.groups.get()):
-        scan_response(flow, body=True)
+    rules = inspection.groups.get()
+    if not before.stream and scans_content(flow.request, rules):
+        if inspection.content_terms(rules) and before.raw_content and scan_limit(before):
+            await scan_buffered_response(flow, rules)
         if flow.response is before and yandex_html(flow) and before.raw_content:
             add_yandex_style_headers(before)
             if len(before.raw_content) <= inspection.MAX_BODY:
@@ -255,17 +270,36 @@ def response(flow):
                 before.raw_content = inspection.insert_yandex_style(before.raw_content)
 
 
-def scan_response(flow, body):
-    rules = inspection.groups.get()
-    if not inspection.content_terms(rules):
+def scan_key(request):
+    return sha256(f"{request.method} {request.pretty_url}".encode()).digest()
+
+
+async def scan_buffered_response(flow, rules):
+    if len(SCAN_PENDING) >= 8:
+        flow.response = http.Response.make(503, b"Content inspection busy", {"Cache-Control": "no-store"})
         return
-    reply = flow.response
-    raw = response_text(reply, text_body(reply) if body else b"")
-    if inspection.matches_content([raw], rules):
-        if body:
+
+    raw = response_text(flow.response, text_body(flow.response))
+    future = asyncio.get_running_loop().run_in_executor(SCAN_WORKERS, inspection.matches_content, [raw], rules)
+    SCAN_PENDING.add(future)
+    future.add_done_callback(SCAN_PENDING.discard)
+    done, _ = await asyncio.wait([future], timeout=SCAN_TIMEOUT)
+    if done:
+        if future.result():
             flow.response = blocked()
-        else:
-            block_response_headers(flow)
+        return
+
+    key = scan_key(flow.request)
+    terms = inspection.content_terms(rules)
+
+    def remember(result):
+        if not result.cancelled() and result.exception() is None and result.result():
+            DEFERRED_BLOCKS[key] = (time.monotonic() + 86400, terms)
+            DEFERRED_BLOCKS.move_to_end(key)
+            if len(DEFERRED_BLOCKS) > 2048:
+                DEFERRED_BLOCKS.popitem(last=False)
+
+    future.add_done_callback(remember)
 
 
 def response_text(reply, body):
