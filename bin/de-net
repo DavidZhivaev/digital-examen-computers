@@ -79,12 +79,24 @@ def rules_up():
     current = installed_rules()
     prefix = "delete table inet %s\n" % TABLE if current is not None else ""
     users = "elements = { %s }" % ", ".join(map(str, sorted(PEOPLE))) if PEOPLE else ""
+    try:
+        inspection_gid = grp.getgrnam("de-inspect").gr_gid
+    except KeyError:
+        inspection_route = ""
+    else:
+        inspection_route = """
+    chain inspection_route {
+        type route hook output priority mangle; policy accept;
+        meta nfproto ipv4 meta skgid %d tcp dport 443 meta mark set 0x%x
+    }
+""" % (inspection_gid, RELAY_MARK)
     ok = nft(prefix + """
 table inet %(table)s {
     set people {
         type uid
         %(users)s
     }
+    %(inspection_route)s
     chain nat_out {
         type nat hook output priority -100; policy accept;
         meta skuid @people ip daddr != 127.0.0.0/8 tcp dport { 80, 443 } redirect to :%(proxy)d
@@ -106,7 +118,7 @@ table inet %(table)s {
     }
 }
 """ % {"table": TABLE, "proxy": PROXY_PORT, "dns": DNS_PORT,
-        "inspect": de_inspection.LISTEN_PORT, "users": users})
+        "inspect": de_inspection.LISTEN_PORT, "users": users, "inspection_route": inspection_route})
     EXPECTED_RULES = installed_rules() if ok else None
     return ok
 
