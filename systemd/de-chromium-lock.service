@@ -1,0 +1,12 @@
+[Unit]
+Description=Clear stale Chromium profile locks after hostname changes
+After=local-fs.target
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3.8 /usr/local/lib/digital-examen/de_chromium_lock.py
+
+[Install]
+WantedBy=multi-user.target

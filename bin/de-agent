@@ -214,10 +214,10 @@ def stats_loop():
             rules = list(dict.fromkeys(rule for group in groups for rule in group.get("tab_titles", [])))
             url_groups = [{
                 "allow": group.get("url_allow", []),
-                "deny": group.get("url_denied", []),
+                "deny": [],
                 "domains": group.get("always_allow", []),
             } for group in groups
-                if group.get("url_allow") or group.get("url_denied") or group.get("always_allow")]
+                if group.get("url_allow") or group.get("always_allow")]
         except (ValueError, TypeError):
             rules, url_groups = [], []
         admin = login and de_common.is_admin(login)
