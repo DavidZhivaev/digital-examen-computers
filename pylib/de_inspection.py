@@ -3,6 +3,8 @@ import binascii
 import json
 from pathlib import Path
 import zlib
+import html
+import re
 from urllib.parse import parse_qs, unquote_plus, urlsplit
 
 import de_patterns
@@ -59,10 +61,24 @@ hosts = CachedFile(HOSTS_FILE, load_hosts, frozenset())
 groups = CachedFile(POLICY_FILE, load_groups, [])
 
 
+def content_terms(rules):
+    return tuple(term.casefold() for rule in rules for term in rule.get("request_deny", []) if term)
+
+
 def matches_content(parts, rules):
+    terms = content_terms(rules)
+    if not terms:
+        return False
     raw = b"\r\n\r\n".join(parts).decode("utf-8", "surrogateescape")
-    combined = (raw + "\n" + unquote_plus(raw, errors="replace")).casefold()
-    return any(term.casefold() in combined for rule in rules for term in rule.get("request_deny", []))
+    folded = raw.casefold()
+    if any(term in folded for term in terms):
+        return True
+    decoded = html.unescape(unquote_plus(raw, errors="replace"))
+    decoded = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match[1], 16)), decoded)
+    visible = re.sub(r"</?[A-Za-z][^<>]{0,512}>", " ", decoded)
+    normalized = " ".join(visible.casefold().split())
+    decoded = decoded.casefold()
+    return any(term in decoded or term in normalized for term in terms)
 
 
 def message_text(first_line, headers, body):

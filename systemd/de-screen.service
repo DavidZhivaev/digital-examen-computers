@@ -6,6 +6,8 @@ ExecStart=/usr/local/sbin/de-screen
 Restart=always
 RestartSec=5
 User=root
+Nice=5
+CPUWeight=50
 
 [Install]
 WantedBy=multi-user.target

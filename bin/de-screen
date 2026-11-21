@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 
 import glob
+import http.client
 import io
 import json
 import os
@@ -11,7 +12,7 @@ import sys
 import threading
 import tempfile
 import time
-import urllib.request
+from urllib.parse import urlsplit
 import zlib
 
 from PIL import Image
@@ -30,8 +31,8 @@ QUALITY = int(de_common.setting("DE_SCREEN_QUALITY", "50"))
 KEY_EVERY = 120
 KEY_SHARE = 40
 STORE_INTERVAL = float(de_common.setting("DE_SCREEN_INTERVAL", "2"))
-LIVE_INTERVAL = 0.5
-WATCH_INTERVAL = 1.5
+LIVE_INTERVAL = 1
+WATCH_INTERVAL = 3
 GRAB_SECONDS = 6
 
 WORK_DIR = os.path.join(de_common.RUN_DIR, "screen")
@@ -129,8 +130,6 @@ def grab_wayland(login):
         return None
     env = de_common.session_env(entry, values)
     env["QT_QPA_PLATFORM"] = "wayland"
-    env["QT_QUICK_BACKEND"] = "software"
-    env["LIBGL_ALWAYS_SOFTWARE"] = "1"
     try:
         with tempfile.TemporaryDirectory(dir=WORK_DIR) as folder:
             os.chown(folder, entry.pw_uid, entry.pw_gid)
@@ -286,13 +285,28 @@ class Stream:
         return data
 
 
-def post_body(body):
-    request = urllib.request.Request(URL.rstrip("/") + "/frame", data=body)
-    request.add_header("Content-Type", "application/octet-stream")
-    request.add_header("X-De-Computer", COMPUTER)
-    request.add_header("X-De-Secret", de_common.secret("screen"))
-    answer = urllib.request.urlopen(request, timeout=10)
-    return json.loads(answer.read().decode("utf-8"))
+class FrameConnection:
+    def __init__(self, timeout):
+        self.target = urlsplit(URL.rstrip("/") + "/frame")
+        kind = http.client.HTTPSConnection if self.target.scheme == "https" else http.client.HTTPConnection
+        self.connection = kind(self.target.hostname, self.target.port, timeout=timeout)
+
+    def post(self, body):
+        headers = {
+            "Content-Type": "application/octet-stream",
+            "X-De-Computer": COMPUTER,
+            "X-De-Secret": de_common.secret("screen"),
+        }
+        try:
+            self.connection.request("POST", self.target.path, body, headers)
+            response = self.connection.getresponse()
+            data = response.read()
+            if response.status != 200:
+                raise OSError("приёмник кадров ответил HTTP %d" % response.status)
+            return json.loads(data)
+        except (OSError, http.client.HTTPException, ValueError) as error:
+            self.connection.close()
+            raise OSError(str(error)) from error
 
 
 def queue_files():
@@ -352,12 +366,13 @@ class Senders:
         with self.live_ready:
             self.live_frame = None
 
-    def post(self, body):
-        answer = post_body(body)
+    def post(self, connection, body):
+        answer = connection.post(body)
         self.interval = int(answer.get("interval", 0))
         self.last_reply = time.monotonic()
 
     def live_loop(self):
+        connection = FrameConnection(1.5)
         while True:
             with self.live_ready:
                 self.live_ready.wait_for(lambda: self.live_frame is not None)
@@ -366,11 +381,12 @@ class Senders:
             if not screen_enabled():
                 continue
             try:
-                self.post(body)
+                self.post(connection, body)
             except (OSError, ValueError):
                 pass
 
     def archive_loop(self):
+        connection = FrameConnection(8)
         while True:
             self.archive_ready.wait(timeout=2)
             self.archive_ready.clear()
@@ -390,7 +406,7 @@ class Senders:
                 if not screen_enabled():
                     break
                 try:
-                    self.post(body)
+                    self.post(connection, body)
                 except (OSError, ValueError):
                     time.sleep(2)
                     break
@@ -416,17 +432,29 @@ def main():
     threading.Thread(target=senders.live_loop, daemon=True).start()
     threading.Thread(target=senders.archive_loop, daemon=True).start()
     next_store = 0.0
+    next_live = 0.0
+    previous_pixels, live_blob = b"", b""
     last_key = ""
     scale_due = 0
     ready_at = 0
     misses = 0
 
     while True:
-        started = time.time()
+        started = time.monotonic()
         if not screen_enabled():
             senders.clear_live()
             last_key = ""
             time.sleep(1)
+            continue
+        local_mode = read_mode()
+        remote_mode = senders.interval if started - senders.last_reply < 6 else 0
+        watched = local_mode or remote_mode
+        if not watched:
+            next_live = 0.0
+        live_due = bool(watched and started >= next_live)
+        store_due = started >= next_store
+        if not live_due and not store_due:
+            time.sleep(0.15)
             continue
         session = de_common.screen_session()
         if session is None or session.get("Class") == "greeter":
@@ -441,7 +469,8 @@ def main():
         if key != last_key:
             senders.clear_live()
             store.reset()
-            next_store = 0.0
+            next_store = next_live = 0.0
+            previous_pixels, live_blob = b"", b""
             last_key = key
             scale_due = 0
             ready_at = time.monotonic() + 0.5
@@ -466,11 +495,14 @@ def main():
             continue
         misses = 0
 
-        local_mode = read_mode()
-        remote_mode = senders.interval if time.monotonic() - senders.last_reply < 6 else 0
-        watched = local_mode or remote_mode
-        if watched:
-            senders.publish_live(live.body(login, True, [[(-1, 0, 0), webp(picture)]]))
+        if live_due:
+            interval = LIVE_INTERVAL if watched == 1 else WATCH_INTERVAL
+            next_live = max(next_live + interval, started + interval)
+            pixels = picture.tobytes()
+            if pixels != previous_pixels:
+                live_blob = webp(picture)
+                previous_pixels = pixels
+            senders.publish_live(live.body(login, True, [[(-1, 0, 0), live_blob]]))
             live.frame_no += 1
 
         if started >= next_store:
@@ -486,15 +518,6 @@ def main():
                 else:
                     store.reset()
 
-        if watched == 1:
-            pause = 1 if session.get("Type") == "wayland" else LIVE_INTERVAL
-        elif watched:
-            pause = WATCH_INTERVAL
-        else:
-            pause = STORE_INTERVAL
-        rest = pause - (time.time() - started)
-        if rest > 0:
-            time.sleep(rest)
 
 
 if __name__ == "__main__":

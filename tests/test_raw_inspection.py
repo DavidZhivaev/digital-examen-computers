@@ -74,3 +74,13 @@ class RawInspectionTests(unittest.TestCase):
             encoded = base64.urlsafe_b64encode(original.encode()).decode().rstrip("=")
             challenge = "https://yandex.ru/showcaptcha?retpath=" + encoded + "_" + "f" * 32
             self.assertEqual(relay.de_inspection.url_blocked("yandex.ru", challenge, rules), blocked)
+
+
+    def test_phrase_split_by_markup_and_escaped_russian_text(self):
+        rules = [{"request_deny": ["Новый чат"]}]
+        self.assertTrue(relay.de_inspection.matches_content(
+            ["<b>Новый</b><span>чат</span>".encode()], rules
+        ))
+        self.assertTrue(relay.de_inspection.matches_content(
+            [br"\u041d\u043e\u0432\u044b\u0439 \u0447\u0430\u0442"], rules
+        ))

@@ -2,7 +2,7 @@ import json
 import re
 
 from mitmproxy import http
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 import de_common
 import de_inspection as inspection
@@ -64,13 +64,24 @@ def text_body(message):
     ) if is_text_message(message) else b""
 
 
+def ai_url(url):
+    parts = urlsplit(url)
+    host = inspection.host_name(parts.hostname or "")
+    path = parts.path.lower().rstrip("/")
+    query = parse_qs(parts.query)
+    if host.startswith("www."):
+        host = host[4:]
+    if host in {"ya.ru", "yandex.ru", "yandex.com", "alice.yandex.ru", "alice.yandex.com"}:
+        return (host.startswith("alice.") or path == "/alice" or path.startswith("/alice/")
+                or (path == "/search" and bool(set(query.get("mode", ())) & {"ai", "alice", "neuro"})))
+    if re.fullmatch(r"google\.(?:com|[a-z]{2}|(?:com|co)\.[a-z]{2})", host):
+        return path in {"/ai", "/aimode"} or (path == "/search" and "50" in query.get("udm", ()))
+    return host in {"gemini.google.com", "aistudio.google.com"}
+
+
 def ai_request(request):
-    host = request.host.rstrip(".").lower()
-    if host in {"ya.ru", "www.ya.ru", "yandex.ru", "www.yandex.ru"}:
-        url = urlsplit(request.path)
-        if url.path.startswith("/alice/") or (url.path.rstrip("/") == "/search"
-                and set(parse_qs(url.query).get("mode", ())) & {"ai", "alice", "neuro"}):
-            return True
+    if ai_url(request.pretty_url):
+        return True
     if request.method != "POST" or "application/json" not in request.headers.get("content-type", "").lower():
         return False
     path = request.path.split("?", 1)[0]
@@ -120,7 +131,7 @@ def request(flow):
                       or inspection.url_blocked(request.host, request.pretty_url, rules))
     if domain_blocked or (scans_content(request) and (
             (any(rule.get("ai_auto") for rule in rules) and ai_request(request))
-            or inspection.matches_content([request_text(request)], rules))):
+            or (inspection.content_terms(rules) and inspection.matches_content([request_text(request)], rules)))):
         flow.response = blocked()
 
 
@@ -128,12 +139,20 @@ def responseheaders(flow):
     if not scans_content(flow.request):
         return
     before = flow.response
+    rules = inspection.groups.get()
+    location = before.headers.get("location", "")
+    if location and 300 <= before.status_code < 400:
+        target = urljoin(flow.request.pretty_url, location)
+        host = urlsplit(target).hostname
+        if host and (inspection.url_blocked(host, target, rules)
+                     or (any(rule.get("ai_auto") for rule in rules) and ai_url(target))):
+            flow.response = blocked()
+            return
+    if not inspection.content_terms(rules):
+        return
     scan_response(flow, body=False)
     if (flow.response is not before or not before.stream or not is_text_message(before)
             or before.headers.get("content-encoding", "identity").lower() not in ("", "identity")):
-        return
-    rules = inspection.groups.get()
-    if not any(rule.get("request_deny") for rule in rules):
         return
     request = request_text(flow.request)
     header = response_text(before, b"")
@@ -149,11 +168,11 @@ def response(flow):
 
 def scan_response(flow, body):
     rules = inspection.groups.get()
-    if not rules:
+    if not inspection.content_terms(rules):
         return
     reply = flow.response
     raw = response_text(reply, text_body(reply) if body else b"")
-    if inspection.matches_content([request_text(flow.request), raw], rules):
+    if inspection.matches_content([raw], rules):
         flow.response = blocked()
 
 
@@ -165,7 +184,7 @@ def response_text(reply, body):
 def websocket_message(flow):
     rules = inspection.groups.get()
     message = flow.websocket.messages[-1]
-    if rules and message.is_text and inspection.matches_content([
+    if inspection.content_terms(rules) and message.is_text and inspection.matches_content([
         request_text(flow.request), message.content[:inspection.MAX_BODY],
     ], rules):
         message.drop()

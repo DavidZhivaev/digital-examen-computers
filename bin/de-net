@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-from concurrent.futures import Future, TimeoutError
+from concurrent.futures import ThreadPoolExecutor
 import grp
 import http.client
 import ipaddress
@@ -38,7 +38,8 @@ PEOPLE_EVERY = 10
 
 TOLD = {}
 AI_CACHE = {}
-AI_PENDING = {}
+AI_PENDING = set()
+AI_WORKERS = ThreadPoolExecutor(max_workers=2)
 AI_HOSTS = de_patterns.read_list(os.path.join(
     de_common.setting("DE_REPO_DIR", "/opt/digital-examen-computers"),
     "proxy", "policy", "ai-domains.txt",
@@ -211,39 +212,37 @@ def policy():
     return POLICY["data"]
 
 
-def ask_ai(host):
-    with LOCK:
-        known = AI_CACHE.get(host)
-        if known and time.monotonic() - known[1] < 3600:
-            return known[0]
-        pending = AI_PENDING.get(host)
-        owner = pending is None
-        if owner:
-            pending = AI_PENDING[host] = Future()
-    if not owner:
-        try:
-            return pending.result(timeout=2)
-        except TimeoutError:
-            return False
-
-    answer = False
+def classify_host(host):
+    answer, ttl = False, 30
     try:
         request = urllib.request.Request(AI_URL, data=json.dumps({"host": host}).encode())
         request.add_header("Content-Type", "application/json")
         request.add_header("X-De-Computer", de_common.computer())
         request.add_header("X-De-Secret", de_common.secret("proxy"))
         with urllib.request.urlopen(request, timeout=2) as response:
-            reply = json.loads(response.read().decode("utf-8"))
-        answer = bool(reply.get("ai"))
-        with LOCK:
-            AI_CACHE[host] = (answer, time.monotonic())
-        return answer
+            answer = bool(json.load(response).get("ai"))
+            ttl = 3600
     except (OSError, ValueError):
-        return False
+        pass
     finally:
-        pending.set_result(answer)
         with LOCK:
-            AI_PENDING.pop(host, None)
+            AI_PENDING.discard(host)
+            if len(AI_CACHE) >= 2048 and host not in AI_CACHE:
+                AI_CACHE.pop(next(iter(AI_CACHE)))
+            AI_CACHE[host] = (answer, time.monotonic() + ttl)
+
+
+def ask_ai(host):
+    if host == "sdo.1580.ru" or host.endswith(".sdo.1580.ru"):
+        return False
+    with LOCK:
+        known = AI_CACHE.get(host)
+        if known and time.monotonic() < known[1]:
+            return known[0]
+        if host not in AI_PENDING and len(AI_PENDING) < 16:
+            AI_PENDING.add(host)
+            AI_WORKERS.submit(classify_host, host)
+        return bool(known and known[0])
 
 
 def decide(host):
