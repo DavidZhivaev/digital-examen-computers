@@ -33,10 +33,17 @@ class CachedFile:
         return self.value
 
 
+class HostSet(frozenset):
+    def __contains__(self, host):
+        return super().__contains__("*") or super().__contains__(host)
+
+
 def load_hosts(text):
-    return frozenset(host for line in text.splitlines() if (
-        re.fullmatch(r"[a-z0-9][a-z0-9.-]*\.1580\.ru", host := host_name(line.strip()))
-    ))
+    return HostSet(
+        host_name(line.strip())
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    )
 
 
 def load_groups(text):
