@@ -87,9 +87,13 @@ def rules_up():
         inspection_route = """
     chain inspection_route {
         type route hook output priority mangle; policy accept;
-        meta nfproto ipv4 meta skgid %d tcp dport 443 meta mark set 0x%x
+        meta nfproto ipv4 meta skgid %d tcp dport 443 meta mark set 0x%x ct mark set 0x%x
     }
-""" % (inspection_gid, RELAY_MARK)
+    chain inspection_source {
+        type nat hook postrouting priority srcnat; policy accept;
+        meta nfproto ipv4 ct mark 0x%x masquerade
+    }
+""" % (inspection_gid, RELAY_MARK, RELAY_MARK, RELAY_MARK)
     ok = nft(prefix + """
 table inet %(table)s {
     set people {
