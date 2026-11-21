@@ -487,7 +487,7 @@ class Handler(socketserver.BaseRequestHandler):
             if sni_of(data).rstrip(".") != host.rstrip("."):
                 return
         try:
-            if port == 443 and group == "" and de_inspection.host_name(host) in de_inspection.hosts.get():
+            if port == 443 and group == "":
                 upstream = socket.create_connection(("127.0.0.1", de_inspection.LISTEN_PORT), timeout=3)
                 try:
                     if de_upstream.tunnel(upstream, host, port) != 200:
