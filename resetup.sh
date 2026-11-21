@@ -80,9 +80,9 @@ if [ -e "$state/users" ] || [ -e "$image" ]; then
     fi
 fi
 
-for unit in de-vault-sync.timer de-rotate.timer de-cleanup.service de-keywatch.service \
+for unit in de-health.timer de-health.service de-vault-sync.timer de-rotate.timer de-cleanup.service de-keywatch.service \
     de-vault-sync.service de-rotate.service de-netns.service de-agent.service de-screen.service \
-    de-traffic.service de-inspect.service de-net.service de-update.timer de-update.service de-secure.service; do
+    de-inspect-ca.timer de-inspect-ca.service de-traffic.service de-inspect.service de-net.service de-update.timer de-update.service de-secure.service; do
     if [ -f "/etc/systemd/system/$unit" ]; then
         systemctl disable --now "$unit"
     fi
@@ -213,6 +213,9 @@ rm -f /usr/local/bin/de-session-start
 systemctl daemon-reload
 
 if [ "$remove" = --remove ]; then
+    if [ -f /usr/local/lib/digital-examen/de_inspection_ca.py ]; then
+        /usr/bin/python3.8 /usr/local/lib/digital-examen/de_inspection_ca.py remove
+    fi
     if [ -f /usr/local/lib/digital-examen/de_firefox_policy.py ]; then
         PYTHONPATH=/usr/local/lib/digital-examen /usr/bin/python3 -m de_firefox_policy remove
     fi
@@ -230,7 +233,7 @@ if [ "$remove" = --remove ]; then
             esac
         done < "$state/installed-files"
     fi
-    for unit in de-agent.service de-screen.service de-traffic.service de-net.service de-update.service de-update.timer; do
+    for unit in de-agent.service de-screen.service de-traffic.service de-inspect.service de-net.service de-update.service de-update.timer; do
         rm -f "/etc/systemd/system/$unit"
     done
     for script in de-agent de-screen de-traffic de-net de-init de-update; do
@@ -243,7 +246,7 @@ if [ "$remove" = --remove ]; then
         rm -f /etc/pki/ca-trust/source/anchors/digital-examen-inspection.crt
         update-ca-trust extract
     fi
-    rm -rf --one-file-system /var/lib/de-inspect "$state/packages"
+    rm -rf --one-file-system /var/lib/de-inspect /opt/de-inspect "$state/packages"
     rm -f "$config/inspect-hosts" "$config/mass-scp.conf"
     rm -rf --one-file-system "$state/screen-queue" /usr/local/lib/digital-examen /run/digital-examen
     rm -f "$state/policy.json" "$state/traffic-queue.jsonl" "$state/traffic-queue.jsonl.sending" "$state/installed-revision" "$state/installed-script" "$state/installed-files" /var/log/digital-examen-computers.log

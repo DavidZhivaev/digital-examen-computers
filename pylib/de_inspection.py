@@ -55,10 +55,10 @@ groups = CachedFile(POLICY_FILE, load_groups, [])
 
 
 def matches_content(parts, rules):
-    combined = b"\r\n\r\n".join(parts).lower()
-    if any(term.lower().encode() in combined for rule in rules for term in rule.get("request_allow", [])):
+    combined = b"\r\n\r\n".join(parts).decode("utf-8", "surrogateescape").casefold()
+    if any(term.casefold() in combined for rule in rules for term in rule.get("request_allow", [])):
         return False
-    return any(term.lower().encode() in combined for rule in rules for term in rule.get("request_deny", []))
+    return any(term.casefold() in combined for rule in rules for term in rule.get("request_deny", []))
 
 
 def message_text(first_line, headers, body):

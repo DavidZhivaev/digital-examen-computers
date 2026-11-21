@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+repo=/opt/digital-examen-computers
+repair=0
+install -d -m 0755 /run/digital-examen
+exec 9>/run/digital-examen/update.lock
+flock -n 9 || exit 0
+
+for definition in "$repo"/systemd/de-*; do
+    unit=${definition##*/}
+    if ! cmp -s "$definition" "/etc/systemd/system/$unit"; then
+        repair=1
+    fi
+done
+for source in "$repo"/pylib/de_*.py; do
+    if ! cmp -s "$source" "/usr/local/lib/digital-examen/${source##*/}"; then
+        repair=1
+    fi
+done
+for source in "$repo"/bin/de "$repo"/bin/de-*; do
+    name=${source##*/}
+    case "$name" in
+        de-deps|de-inspect-install) continue ;;
+        de|de-note-command|de-tabs-native) target="/usr/local/bin/$name" ;;
+        *) target="/usr/local/sbin/$name" ;;
+    esac
+    if ! cmp -s "$source" "$target"; then
+        repair=1
+    fi
+done
+if [ ! -x /opt/de-inspect/bin/mitmdump ]; then
+    repair=1
+fi
+if [ "$repair" = 1 ]; then
+    sh "$repo/setup.sh" --update
+fi
+
+for definition in "$repo"/systemd/de-*; do
+    grep -qxF '[Install]' "$definition" || continue
+    unit=${definition##*/}
+    systemctl is-enabled --quiet "$unit" || systemctl enable "$unit"
+    systemctl is-active --quiet "$unit" || systemctl start "$unit"
+done

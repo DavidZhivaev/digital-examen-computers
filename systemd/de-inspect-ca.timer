@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Digital Examen inspection trust
+
+[Timer]
+OnBootSec=60s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Unit=de-inspect-ca.service
+
+[Install]
+WantedBy=timers.target

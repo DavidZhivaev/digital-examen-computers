@@ -90,6 +90,9 @@ need "Pillow" "python3 -c 'from PIL import Image'" python3-pil python3-pillow py
 need "nft" "command -v nft" nftables nftables nftables || note_missing
 need "setpriv" "command -v setpriv" util-linux util-linux util-linux || note_missing
 need "ffmpeg" "command -v ffmpeg" ffmpeg ffmpeg ffmpeg || note_missing
+need "Python 3.8" "/usr/bin/python3.8 -m ensurepip --version" python3.8-venv python38 python38 || note_missing
+need "certutil" "command -v certutil" libnss3-tools nss-tools nss || note_missing
+need "OpenSSL" "command -v openssl" openssl openssl openssl || note_missing
 need "sudo" "command -v sudo" sudo sudo sudo || note_missing
 
 VERSION=`python3 -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>/dev/null`

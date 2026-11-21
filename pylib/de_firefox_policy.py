@@ -43,6 +43,26 @@ def change(install):
         STATE.unlink()
 
 
+def inspection_ca(path, install):
+    data = json.loads(POLICY.read_text()) if POLICY.exists() else {}
+    if not install and path not in data.get("policies", {}).get("Certificates", {}).get("Install", []):
+        return
+    policies = data.setdefault("policies", {})
+    certificates = policies.setdefault("Certificates", {})
+    paths = certificates.setdefault("Install", [])
+    if install:
+        if path in paths:
+            return
+        paths.append(path)
+    else:
+        paths.remove(path)
+        if not paths:
+            certificates.pop("Install")
+        if not certificates:
+            policies.pop("Certificates")
+    write_file(POLICY, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
 if __name__ == "__main__":
     try:
         change(sys.argv[1] == "install")

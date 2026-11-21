@@ -1,0 +1,7 @@
+[Unit]
+Description=Check installed Digital Examen files and services
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/de-health
+TimeoutStartSec=15min

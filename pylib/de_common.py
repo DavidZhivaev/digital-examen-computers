@@ -238,27 +238,21 @@ def is_admin(login):
     return False
 
 
-def uid_min():
-    value = 1000
-    try:
-        for line in open("/etc/login.defs"):
-            parts = line.split()
-            if len(parts) == 2 and parts[0] == "UID_MIN":
-                value = int(parts[1])
-    except (IOError, ValueError):
-        pass
-    return value
-
-
 def people():
-    low = uid_min()
+    with open("/etc/shells") as source:
+        shells = {line.strip() for line in source if line.startswith("/")}
     out = []
     for entry in pwd.getpwall():
-        if (entry.pw_uid < low and entry.pw_name != "student") or entry.pw_uid >= 60000:
+        if entry.pw_shell not in shells or entry.pw_shell.endswith(("nologin", "false")):
             continue
-        if entry.pw_shell.endswith("nologin") or entry.pw_shell.endswith("false"):
+        if entry.pw_uid == 0:
             continue
-        if is_admin(entry.pw_name):
-            continue
-        out.append(entry)
+        privileges = subprocess.run(
+            ["sudo", "-n", "-l", "-U", entry.pw_name],
+            env=dict(os.environ, LC_ALL="C"), text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+        if not any(line.startswith("User " + entry.pw_name + " may run the following commands")
+                   for line in privileges.stdout.splitlines()):
+            out.append(entry)
     return out

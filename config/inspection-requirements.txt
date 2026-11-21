@@ -1,0 +1,2 @@
+mitmproxy==8.0.0
+Werkzeug==2.3.8

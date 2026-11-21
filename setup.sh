@@ -29,6 +29,7 @@ if [ "$here" != "$repo" ]; then
 fi
 
 sh "$here/bin/de-deps"
+sh "$here/bin/de-inspect-install" "$here/config/inspection-requirements.txt"
 install -d -m 0755 /etc/digital-examen /usr/local/lib/digital-examen
 install -d -m 0700 "$state" "$state/screen-queue"
 manifest=$(mktemp "$state/.installed-files.XXXXXX")
@@ -44,7 +45,7 @@ done
 for script in "$here"/bin/de "$here"/bin/de-*; do
     name=${script##*/}
     case "$name" in
-        de-deps) ;;
+        de-deps|de-inspect-install) ;;
         de|de-note-command|de-tabs-native) put 0755 "$script" "/usr/local/bin/$name" ;;
         *) put 0750 "$script" "/usr/local/sbin/$name" ;;
     esac

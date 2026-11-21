@@ -2,6 +2,7 @@
 
 from concurrent.futures import Future, TimeoutError
 import grp
+import http.client
 import ipaddress
 import json
 import os
@@ -434,6 +435,67 @@ def connect_web(host, port, public_only, timeout=10):
     raise OSError("сайт недоступен")
 
 
+def inspect_http(client, upstream, data, host, port):
+    payload, remaining = de_upstream.http_request(data, host, port)
+    if remaining + len(payload) > de_inspection.MAX_BODY:
+        raise ValueError("слишком большой запрос")
+    head, pending = payload.split(b"\r\n\r\n", 1)
+    body = bytearray(pending)
+    while remaining:
+        chunk = client.recv(remaining)
+        if not chunk:
+            raise OSError("неполный запрос HTTP")
+        body.extend(chunk)
+        remaining -= len(chunk)
+    rules = de_inspection.groups.get()
+    if de_inspection.matches_content([head, body], rules):
+        client.sendall(BLOCKED)
+        return True
+    first, *headers = head.split(b"\r\n")
+    method, target, version = first.split()
+    path = target[len(b"http://" + de_upstream.authority(host, port).encode("ascii")):]
+    headers = [line for line in headers if line.split(b":", 1)[0].lower() not in
+               (b"accept-encoding", b"upgrade", b"expect")]
+    request = b"\r\n".join([b" ".join((method, path, version)), *headers,
+                            b"Accept-Encoding: identity", b"", body])
+    upstream.sendall(request)
+    with http.client.HTTPResponse(upstream, method=method.decode("ascii")) as reply:
+        reply.begin()
+        if reply.status == 101:
+            raise ValueError("смена протокола не поддерживается")
+        fields = reply.getheaders()
+        status = "HTTP/1.1 %d " % reply.status
+        response_headers = "\r\n".join("%s: %s" % field for field in fields)
+        prefix = reply.read(de_inspection.MAX_BODY)
+        content_type = reply.headers.get_content_type()
+        encoding = reply.headers.get("Content-Encoding", "identity").lower()
+        text = content_type.startswith("text/") or content_type.endswith(("json", "xml", "javascript"))
+        inspected = prefix if text and encoding == "identity" else b""
+        if de_inspection.matches_content(
+                [head, body, (status + "\r\n" + response_headers).encode("latin-1"), inspected], rules):
+            client.sendall(BLOCKED)
+            return True
+        excluded = {"connection", "transfer-encoding", "trailer", "upgrade", "keep-alive"}
+        excluded.update(name.strip().lower() for name in reply.headers.get("Connection", "").split(","))
+        if method != b"HEAD":
+            excluded.add("content-length")
+        headers = [
+            "%s: %s" % (name, value)
+            for name, value in fields
+            if name.lower() not in excluded
+            and de_upstream.TOKEN.fullmatch(name.encode("latin-1"))
+            and all(ord(char) >= 32 or char == "\t" for char in value)
+        ]
+        client.sendall("\r\n".join([status, *headers, "Connection: close", "", ""]).encode("latin-1"))
+        client.sendall(prefix)
+        while True:
+            chunk = reply.read(65536)
+            if not chunk:
+                break
+            client.sendall(chunk)
+    return False
+
+
 class Handler(socketserver.BaseRequestHandler):
 
     def handle(self):
@@ -498,6 +560,16 @@ class Handler(socketserver.BaseRequestHandler):
             else:
                 upstream = connect_web(ip, port, proxy is not None)
         except OSError:
+            return
+        if port == 80 and group == "":
+            try:
+                with upstream:
+                    if inspect_http(client, upstream, data, host, port):
+                        note_block(host, login, "Фильтр содержимого")
+                    else:
+                        note("site", host, login)
+            except (OSError, ValueError, http.client.HTTPException):
+                pass
             return
         client.settimeout(None)
         upstream.settimeout(None)
@@ -632,6 +704,12 @@ def main():
         log("не удалось настроить прямой маршрут веб-реле")
     threading.Thread(target=people_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
+    notification = os.environ.get("NOTIFY_SOCKET")
+    if notification:
+        if notification.startswith("@"):
+            notification = "\0" + notification[1:]
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as systemd:
+            systemd.sendto(b"READY=1", notification)
     log("ограничения сети запущены")
     try:
         server.serve_forever()

@@ -4,6 +4,7 @@ After=de-traffic.service network-online.target
 Wants=de-traffic.service
 
 [Service]
+Type=notify
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/local/sbin/de-net
 ExecStopPost=/usr/local/sbin/de-net down
