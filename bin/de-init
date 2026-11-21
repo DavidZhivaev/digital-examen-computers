@@ -48,10 +48,10 @@ def fetch_public_key():
         de_common.write_file(de_keys.PUBLIC_KEY_FILE, pem)
 
 
-def read_key():
+def read_key(preferred=""):
     asked = False
     while True:
-        path = de_keys.find_key(KEY_NAME)
+        path = preferred or de_keys.find_key(KEY_NAME)
         if path:
             values = de_keys.parse_key(path)
             if values.get("token") and values.get("verified"):
@@ -86,7 +86,7 @@ def main():
         return 1
 
     fetch_public_key()
-    key = read_key()
+    key = read_key(sys.argv[1] if len(sys.argv) > 1 else "")
     if not key:
         say("Ключ не предъявлен, установка прервана")
         return 1

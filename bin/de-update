@@ -1,9 +1,15 @@
 #!/usr/bin/python3
 
+import fcntl
 import os
 import subprocess
 import sys
 import time
+
+sys.path.insert(0, "/usr/local/lib/digital-examen")
+
+import de_common
+import de_migrations
 
 CONFIG_FILE = "/etc/digital-examen/computers.conf"
 
@@ -30,9 +36,12 @@ CONFIG = read_config()
 REPO_DIR = CONFIG.get("DE_REPO_DIR", "/opt/digital-examen-computers")
 BRANCH = CONFIG.get("DE_REPO_BRANCH", "main")
 LOG = CONFIG.get("DE_LOG_FILE", "/var/log/digital-examen-computers.log")
+LAST_MESSAGE = ""
 
 
 def log(message):
+    global LAST_MESSAGE
+    LAST_MESSAGE = message
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     try:
         out = open(LOG, "a")
@@ -65,9 +74,19 @@ def installation_exists():
     return bool(paths) and all(os.path.isfile(path) for path in paths)
 
 
+def migrate():
+    try:
+        de_migrations.apply(REPO_DIR)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        log("сценарий обновления: " + str(error))
+        return 1
+    return 0
+
+
 def main():
     if not os.path.isdir(os.path.join(REPO_DIR, ".git")):
-        return 0
+        log("репозиторий агента отсутствует")
+        return 1
 
     applied_file = "/var/lib/digital-examen/installed-revision"
     try:
@@ -76,24 +95,28 @@ def main():
     except OSError:
         before = ""
 
+    de_migrations.initialize(REPO_DIR)
+
     code, out = run(["git", "fetch", "--quiet", "origin", BRANCH])
     if code != 0:
         log("fetch не прошёл: " + out[:200])
-        return 0
+        return 1
 
     code, out = run(["git", "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"])
     if code != 0:
         log("полученная ветка не продолжает установленную версию")
-        return 0
+        return 1
 
     code, out = run(["git", "reset", "--hard", "--quiet", "FETCH_HEAD"])
     if code != 0:
         log("reset не прошёл: " + out[:200])
-        return 0
+        return 1
 
     after = head()
-    if not after or (after == before and installation_exists()):
-        return 0
+    if not after:
+        return 1
+    if after == before and installation_exists():
+        return migrate()
 
     log("обновление %s -> %s, переустанавливаю" % (before[:8], after[:8]))
 
@@ -104,17 +127,45 @@ def main():
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         log("переустановка не запустилась: " + str(error))
-        return 0
+        return 1
 
     if done.returncode != 0:
         log("переустановка вернула код %d" % done.returncode)
-        return 0
+        return 1
 
     with open(applied_file + ".new", "w") as output:
         output.write(after + "\n")
     os.replace(applied_file + ".new", applied_file)
+    if migrate():
+        return 1
     log("обновление применено")
     return 0
 
 
-sys.exit(main())
+def locked_update():
+    os.makedirs(de_common.RUN_DIR, exist_ok=True)
+    path = os.path.join(de_common.RUN_DIR, "update.lock")
+    with open(path, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return main()
+
+
+if len(sys.argv) == 3 and sys.argv[1] == "--report":
+    target_id = int(sys.argv[2])
+    try:
+        code = locked_update()
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        log(str(error))
+        code = 1
+    api = de_common.setting("DE_API_URL").rstrip("/")
+    result = {"target_id": target_id, "code": code,
+              "output": (LAST_MESSAGE or "Установленная версия актуальна").replace("\0", "")[:20000]}
+    for attempt in range(3):
+        try:
+            de_common.send_json(api + "/api/computers/device/command-jobs/result", result, "proxy", 10)
+            break
+        except (OSError, ValueError):
+            time.sleep(2)
+    sys.exit(code)
+
+sys.exit(locked_update())

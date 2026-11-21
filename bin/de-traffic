@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+from collections import deque
 import json
 import os
 import pwd
@@ -15,12 +16,13 @@ import de_common
 
 API = de_common.setting("DE_API_URL")
 COMPUTER = de_common.computer()
-QUEUE = os.path.join(de_common.STATE_DIR, "traffic-queue.jsonl")
-PENDING = QUEUE + ".sending"
+QUEUE = os.path.join(de_common.RUN_DIR, "traffic-queue.jsonl")
+LEGACY_QUEUE = os.path.join(de_common.STATE_DIR, "traffic-queue.jsonl")
 SOCKET_PATH = os.path.join(de_common.RUN_DIR, "traffic.sock")
 FLUSH = 2
 MAX_PER_FLUSH = 2000
 MAX_QUEUE = 50000
+MAX_BYTES = 16 * 1024 * 1024
 KINDS = ("site", "block", "command", "alarm")
 LOCK = threading.Lock()
 
@@ -40,10 +42,10 @@ def keep(record):
     line = json.dumps({"kind": kind, "value": value, "at": at, "login": login})
     with LOCK:
         try:
-            out = open(QUEUE, "a")
-            out.write(line + "\n")
-            out.close()
-            os.chmod(QUEUE, 0o600)
+            descriptor = os.open(QUEUE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(descriptor, "a") as queue:
+                if queue.tell() < MAX_BYTES:
+                    queue.write(line + "\n")
         except IOError:
             pass
 
@@ -77,15 +79,15 @@ def listen():
             continue
 
 
-def take_queue():
+def take_queue(queue, pending):
     with LOCK:
-        if not os.path.exists(PENDING) and os.path.exists(QUEUE):
-            os.replace(QUEUE, PENDING)
-    if not os.path.exists(PENDING):
+        if not os.path.exists(pending) and os.path.exists(queue):
+            os.replace(queue, pending)
+    if not os.path.exists(pending):
         return []
     out = []
-    with open(PENDING) as source:
-        for line in source.readlines()[-MAX_QUEUE:]:
+    with open(pending) as source:
+        for line in deque(source, maxlen=MAX_QUEUE):
             try:
                 out.append(json.loads(line))
             except ValueError:
@@ -93,13 +95,13 @@ def take_queue():
     return out
 
 
-def checkpoint(entries):
+def checkpoint(pending, entries):
     if not entries:
-        if os.path.exists(PENDING):
-            os.unlink(PENDING)
+        if os.path.exists(pending):
+            os.unlink(pending)
         return
     text = "".join(json.dumps(item) + "\n" for item in entries)
-    de_common.write_file(PENDING, text, 0o600)
+    de_common.write_file(pending, text, 0o600)
 
 
 def post(login, entries):
@@ -113,7 +115,9 @@ def post(login, entries):
 
 
 def flush():
-    entries = take_queue()
+    queue = LEGACY_QUEUE if os.path.exists(LEGACY_QUEUE) or os.path.exists(LEGACY_QUEUE + ".sending") else QUEUE
+    pending = queue + ".sending"
+    entries = take_queue(queue, pending)
     groups = {}
     for item in entries[:MAX_PER_FLUSH]:
         groups.setdefault(item["login"], []).append(item)
@@ -126,9 +130,9 @@ def flush():
             continue
         sent = {id(item) for item in items}
         entries = [item for item in entries if id(item) not in sent]
-        checkpoint(entries)
+        checkpoint(pending, entries)
     if not entries:
-        checkpoint([])
+        checkpoint(pending, [])
 
 
 def main():

@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 
 from concurrent.futures import Future, TimeoutError
+import grp
 import ipaddress
 import json
 import os
@@ -20,26 +21,20 @@ sys.path.insert(0, "/usr/local/lib/digital-examen")
 import de_ansible_network
 import de_common
 import de_patterns
+import de_inspection
 import de_upstream
 
 PROXY_PORT = 3129
 DNS_PORT = 5399
-UPSTREAM_HOST = de_common.setting("DE_NET_SCHOOL_PROXY_HOST", "10.171.219.221")
-UPSTREAM_PORT = int(de_common.setting("DE_NET_SCHOOL_PROXY_PORT", "3128"))
-PROBE_HOST = de_common.setting("DE_NET_SCHOOL_PROXY_PROBE_HOST", "ex.1580.ru")
-PROXY_READY = threading.Event()
 TABLE = "de_agent"
 RELAY_MARK = 0x44450000
 SCHOOL_PROXY_MARK = 0x44450001
-RELAY_DIRECT = de_common.setting("DE_NET_RELAY_DIRECT", "1") == "1"
 RELAY_RULE = ["pref", "8999", "fwmark", hex(RELAY_MARK) + "/0xffffffff", "lookup", "main"]
 POLICY_FILE = os.path.join(de_common.STATE_DIR, "policy.json")
 TRAFFIC_SOCKET = os.path.join(de_common.RUN_DIR, "traffic.sock")
 AI_URL = de_common.setting("DE_API_URL", "").rstrip("/") + "/api/computers/device/ai"
-SEEN_SECONDS = 15
-PEOPLE_EVERY = 30
+PEOPLE_EVERY = 10
 
-SEEN = {}
 TOLD = {}
 AI_CACHE = {}
 AI_PENDING = {}
@@ -50,6 +45,7 @@ AI_HOSTS = de_patterns.read_list(os.path.join(
 POLICY = {"stamp": 0, "data": {}}
 LOCK = threading.Lock()
 PEOPLE = set()
+EXPECTED_RULES = None
 
 BLOCKED_BODY = (
     "<html><head><meta charset=\"utf-8\"><title>Закрыто</title></head>"
@@ -75,12 +71,22 @@ def nft(script):
     return process.returncode == 0
 
 
+def installed_rules():
+    result = subprocess.run(["nft", "list", "table", "inet", TABLE],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return result.stdout if result.returncode == 0 else None
+
+
 def rules_up():
-    rules_down()
-    return nft("""
+    global EXPECTED_RULES
+    current = installed_rules()
+    prefix = "delete table inet %s\n" % TABLE if current is not None else ""
+    users = "elements = { %s }" % ", ".join(map(str, sorted(PEOPLE))) if PEOPLE else ""
+    ok = nft(prefix + """
 table inet %(table)s {
     set people {
         type uid
+        %(users)s
     }
     chain nat_out {
         type nat hook output priority -100; policy accept;
@@ -96,33 +102,39 @@ table inet %(table)s {
         ip6 daddr ::1 tcp dport %(proxy)d accept
         ip daddr 127.0.0.1 udp dport %(dns)d accept
         ip6 daddr ::1 udp dport %(dns)d accept
+        tcp dport %(inspect)d reject with tcp reset
         oifname "lo" accept
         meta l4proto tcp reject with tcp reset
         reject
     }
 }
-""" % {"table": TABLE, "proxy": PROXY_PORT, "dns": DNS_PORT})
+""" % {"table": TABLE, "proxy": PROXY_PORT, "dns": DNS_PORT,
+        "inspect": de_inspection.LISTEN_PORT, "users": users})
+    EXPECTED_RULES = installed_rules() if ok else None
+    return ok
 
 
 def relay_exception(enable):
+    try:
+        inspection_gid = grp.getgrnam("de-inspect").gr_gid
+    except KeyError:
+        inspection_gid = None
     for tool, loopback in (("iptables", "127.0.0.1"), ("ip6tables", "::1")):
+        legacy_proxy = ["-m", "owner", "--uid-owner", "0", "-m", "mark", "--mark",
+                        hex(SCHOOL_PROXY_MARK), "-p", "tcp", "--dport", "3128"]
         rules = [
             ["-m", "owner", "--uid-owner", "0", "-m", "mark", "--mark",
              hex(RELAY_MARK), "-p", "tcp", "-m", "multiport", "--dports", "80,443"],
-            ["-m", "owner", "--uid-owner", "0", "-m", "mark", "--mark",
-             hex(SCHOOL_PROXY_MARK), "-p", "tcp", "--dport", str(UPSTREAM_PORT)],
             ["-d", loopback, "-p", "tcp", "--dport", str(PROXY_PORT)],
             ["-d", loopback, "-p", "udp", "--dport", str(DNS_PORT)],
         ]
-        legacy_ports = ",".join(map(str, sorted({80, 443, UPSTREAM_PORT})))
+        if inspection_gid is not None:
+            rules.append(["-m", "owner", "--gid-owner", str(inspection_gid), "-p", "tcp", "--dport", "443"])
         prefix = [tool, "-w", "2"]
         options = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         try:
-            if legacy_ports != "80,443":
-                subprocess.call(prefix + ["-D", "OUTPUT", "-m", "owner", "--uid-owner", "0",
-                                "-m", "mark", "--mark", hex(RELAY_MARK), "-p", "tcp", "-m",
-                                "multiport", "--dports", legacy_ports, "-m", "comment",
-                                "--comment", "Digital Examen web relay", "-j", "ACCEPT"], **options)
+            suffix = ["-m", "comment", "--comment", "Digital Examen web relay", "-j", "ACCEPT"]
+            subprocess.call(prefix + ["-D", "OUTPUT"] + legacy_proxy + suffix, **options)
             for match in rules:
                 match += ["-m", "comment", "--comment", "Digital Examen web relay", "-j", "ACCEPT"]
                 present = subprocess.call(prefix + ["-C", "OUTPUT"] + match, **options) == 0
@@ -149,7 +161,7 @@ def rules_down():
 
 
 def update_people():
-    global PEOPLE
+    global PEOPLE, EXPECTED_RULES
     current = {entry.pw_uid for entry in de_common.people()}
     if current == PEOPLE:
         return True
@@ -159,6 +171,7 @@ def update_people():
     if not nft(script):
         return False
     PEOPLE = current
+    EXPECTED_RULES = installed_rules()
     log("ограничения действуют для UID: " + (", ".join(map(str, sorted(current))) or "никого"))
     return True
 
@@ -166,52 +179,24 @@ def update_people():
 def people_loop():
     while True:
         time.sleep(PEOPLE_EVERY)
-        relay_exception(True)
         try:
+            if EXPECTED_RULES is None or installed_rules() != EXPECTED_RULES:
+                if rules_up():
+                    log("правила сети восстановлены")
             update_people()
         except Exception as error:
             log("список людей не собран: %s" % error)
 
 
 def reconcile_loop():
+    next_config_check = 0
     while True:
-        de_ansible_network.reconcile()
-        time.sleep(300)
-
-
-def proxy_state(ready):
-    if ready == PROXY_READY.is_set():
-        return
-    if ready:
-        PROXY_READY.set()
-        log("школьный прокси доступен")
-    else:
-        PROXY_READY.clear()
-        log("школьный прокси недоступен, используется прямое реле с фильтрацией")
-
-
-def proxy_credential(login):
-    computer = de_common.computer()
-    secret = de_common.secret("proxy")
-    if not computer or not secret:
-        return b""
-    return de_upstream.authorization(computer, secret, login)
-
-
-def probe_loop():
-    while True:
-        started = time.monotonic()
-        try:
-            credential = proxy_credential("_de_probe")
-            if not credential:
-                proxy_state(False)
-            else:
-                with connect_web(UPSTREAM_HOST, UPSTREAM_PORT, False, timeout=4, mark=SCHOOL_PROXY_MARK) as upstream:
-                    status = de_upstream.tunnel(upstream, PROBE_HOST, 443, credential)
-                    proxy_state(status in (200, 403))
-        except (OSError, ValueError):
-            proxy_state(False)
-        time.sleep(max(0, 60 - (time.monotonic() - started)))
+        relay_exception(True)
+        now = time.monotonic()
+        if now >= next_config_check:
+            de_ansible_network.reconcile()
+            next_config_check = now + 60
+        time.sleep(15)
 
 
 def policy():
@@ -268,11 +253,12 @@ def ask_ai(host):
 def decide(host):
     groups = sorted(policy().get("groups", []), key=lambda item: -int(item.get("priority", 50)))
     for group in groups:
+        if de_patterns.any_match(group.get("always_allow"), host):
+            return "pass", group.get("name") or "Всегда разрешено"
+    for group in groups:
         name = group.get("name", "")
         if group.get("ai_auto") and de_patterns.any_match(AI_HOSTS, host):
             return "block", name
-        if de_patterns.any_match(group.get("always_allow"), host):
-            return "pass", name
         if group.get("principle") == "allow":
             return "block", name
         if de_patterns.any_match(group.get("denied"), host):
@@ -290,18 +276,6 @@ def note(kind, value, login):
         client.close()
     except OSError:
         pass
-
-
-def note_visit(host, login):
-    key = login + "|" + host
-    now = time.time()
-    with LOCK:
-        if now - SEEN.get(key, 0) < SEEN_SECONDS:
-            return
-        SEEN[key] = now
-        if len(SEEN) > 20000:
-            SEEN.clear()
-    note("site", host, login)
 
 
 def note_block(host, login, group):
@@ -445,30 +419,19 @@ def proxy_target(data):
     return address.hostname, port, payload, tunnel
 
 
-def connect_web(host, port, public_only, timeout=10, mark=RELAY_MARK):
+def connect_web(host, port, public_only, timeout=10):
     for family, kind, protocol, _, address in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
         if public_only and not ipaddress.ip_address(address[0]).is_global:
             continue
         upstream = socket.socket(family, kind, protocol)
         try:
             upstream.settimeout(timeout)
-            upstream.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, mark)
+            upstream.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, RELAY_MARK)
             upstream.connect(address)
             return upstream
         except OSError:
             upstream.close()
     raise OSError("сайт недоступен")
-
-
-def connect_proxy(host, port, secure, credential):
-    upstream = connect_web(UPSTREAM_HOST, UPSTREAM_PORT, False, timeout=4, mark=SCHOOL_PROXY_MARK)
-    try:
-        if secure and de_upstream.tunnel(upstream, host, port, credential) != 200:
-            raise de_upstream.ProxyDenied()
-        return upstream
-    except (OSError, ValueError, de_upstream.ProxyDenied):
-        upstream.close()
-        raise
 
 
 class Handler(socketserver.BaseRequestHandler):
@@ -523,41 +486,29 @@ class Handler(socketserver.BaseRequestHandler):
                 return
             if sni_of(data).rstrip(".") != host.rstrip("."):
                 return
-        upstream = None
-        remaining = None
-        credential = proxy_credential(login) if UPSTREAM_HOST and PROXY_READY.is_set() else b""
-        if credential:
-            try:
-                proxied_data = data
-                if port == 80:
-                    proxied_data, remaining = de_upstream.http_request(data, host, port, credential)
-                upstream = connect_proxy(host, port, port == 443, credential)
-                data = proxied_data
-            except de_upstream.ProxyDenied:
-                return
-            except ValueError:
-                return
-            except OSError:
-                proxy_state(False)
-                remaining = None
-        if upstream is None:
-            try:
+        try:
+            if port == 443 and group == "" and de_inspection.host_name(host) in de_inspection.hosts.get():
+                upstream = socket.create_connection(("127.0.0.1", de_inspection.LISTEN_PORT), timeout=3)
+                try:
+                    if de_upstream.tunnel(upstream, host, port) != 200:
+                        raise OSError("локальный анализ отклонил домен")
+                except OSError:
+                    upstream.close()
+                    raise
+            else:
                 upstream = connect_web(ip, port, proxy is not None)
-            except OSError:
-                return
-        client.settimeout(None if remaining is None else 30)
-        upstream.settimeout(None if remaining is None else 60)
+        except OSError:
+            return
+        client.settimeout(None)
+        upstream.settimeout(None)
         try:
             if data:
                 upstream.sendall(data)
-            note_visit(host, login)
+            note("site", de_inspection.host_name(host), login)
         except OSError:
             upstream.close()
             return
-        if remaining is None:
-            other = threading.Thread(target=pipe, args=(client, upstream), daemon=True)
-        else:
-            other = threading.Thread(target=de_upstream.send_body, args=(client, upstream, remaining), daemon=True)
+        other = threading.Thread(target=pipe, args=(client, upstream), daemon=True)
         other.start()
         pipe(upstream, client)
         other.join(timeout=5)
@@ -677,13 +628,10 @@ def main():
     if not rules_up() or not update_people():
         log("правила сети не поставились")
         return 1
-    if RELAY_DIRECT and not relay_route(True):
+    if not relay_route(True):
         log("не удалось настроить прямой маршрут веб-реле")
     threading.Thread(target=people_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
-    if UPSTREAM_HOST:
-        PROXY_READY.set()
-        threading.Thread(target=probe_loop, daemon=True).start()
     log("ограничения сети запущены")
     try:
         server.serve_forever()

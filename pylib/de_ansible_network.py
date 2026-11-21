@@ -5,8 +5,8 @@ import re
 import de_common
 
 LEGACY_PROXY = re.compile(
-    r'^\s*(?:export\s+)?(?:http_proxy|https_proxy)\s*=\s*'
-    r'(?:"http://squid\.1580\.ru:80"|\'http://squid\.1580\.ru:80\'|http://squid\.1580\.ru:80)\s*$',
+    r'''^\s*(?:export\s+)?(?:http_proxy|https_proxy|all_proxy)\s*=\s*'''
+    r'''(["']?)(?:http://)?(?:squid\.1580\.ru:80|10\.171\.219\.221:3128)\1\s*$''',
     re.IGNORECASE,
 )
 

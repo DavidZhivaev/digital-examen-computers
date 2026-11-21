@@ -82,7 +82,7 @@ fi
 
 for unit in de-vault-sync.timer de-rotate.timer de-cleanup.service de-keywatch.service \
     de-vault-sync.service de-rotate.service de-netns.service de-agent.service de-screen.service \
-    de-traffic.service de-net.service de-update.timer de-update.service de-secure.service; do
+    de-traffic.service de-inspect.service de-net.service de-update.timer de-update.service de-secure.service; do
     if [ -f "/etc/systemd/system/$unit" ]; then
         systemctl disable --now "$unit"
     fi
@@ -213,6 +213,9 @@ rm -f /usr/local/bin/de-session-start
 systemctl daemon-reload
 
 if [ "$remove" = --remove ]; then
+    if [ -f /usr/local/lib/digital-examen/de_firefox_policy.py ]; then
+        PYTHONPATH=/usr/local/lib/digital-examen /usr/bin/python3 -m de_firefox_policy remove
+    fi
     if [ -f "$state/installed-files" ]; then
         while IFS= read -r path; do
             case "$path" in
@@ -221,7 +224,7 @@ if [ "$remove" = --remove ]; then
                     systemctl disable --now "${path##*/}"
                     unlink "$path"
                     ;;
-                /usr/local/sbin/de-*|/usr/local/bin/de-note-command|/usr/local/bin/de-tabs-native|/etc/*/native-messaging-hosts/ru.digital_examen.tabs.json|/etc/*/policies/managed/digital-examen-tabs.json|/usr/lib*/mozilla/native-messaging-hosts/ru.digital_examen.tabs.json|/usr/local/lib/digital-examen/de_*.py|/etc/profile.d/de-history.sh)
+                /usr/local/sbin/de-*|/usr/local/bin/de|/usr/local/bin/de-note-command|/usr/local/bin/de-tabs-native|/etc/*/native-messaging-hosts/ru.digital_examen.tabs.json|/etc/*/policies/managed/digital-examen-tabs.json|/usr/lib*/mozilla/native-messaging-hosts/ru.digital_examen.tabs.json|/usr/local/lib/digital-examen/de_*.py|/etc/profile.d/de-history.sh)
                     [ ! -f "$path" ] || unlink "$path"
                     ;;
             esac
@@ -233,11 +236,17 @@ if [ "$remove" = --remove ]; then
     for script in de-agent de-screen de-traffic de-net de-init de-update; do
         rm -f "/usr/local/sbin/$script"
     done
-    rm -f /etc/profile.d/de-history.sh /usr/local/bin/de-note-command \
+    rm -f /etc/profile.d/de-history.sh /usr/local/bin/de /usr/local/bin/de-note-command \
         "$config/computers.conf" "$config/command.secret" "$config/proxy.secret" \
         "$config/screen.secret" "$config/key-public.pem" "$config/no-open.txt"
+    if [ -f /etc/pki/ca-trust/source/anchors/digital-examen-inspection.crt ]; then
+        rm -f /etc/pki/ca-trust/source/anchors/digital-examen-inspection.crt
+        update-ca-trust extract
+    fi
+    rm -rf --one-file-system /var/lib/de-inspect "$state/packages"
+    rm -f "$config/inspect-hosts" "$config/mass-scp.conf"
     rm -rf --one-file-system "$state/screen-queue" /usr/local/lib/digital-examen /run/digital-examen
-    rm -f "$state/policy.json" "$state/traffic-queue.jsonl" "$state/traffic-queue.jsonl.sending" "$state/installed-revision" "$state/installed-files" /var/log/digital-examen-computers.log
+    rm -f "$state/policy.json" "$state/traffic-queue.jsonl" "$state/traffic-queue.jsonl.sending" "$state/installed-revision" "$state/installed-script" "$state/installed-files" /var/log/digital-examen-computers.log
     if [ -d "$repo/.git" ]; then rm -rf --one-file-system "$repo"; fi
     systemctl daemon-reload
     echo "Агент удалён"

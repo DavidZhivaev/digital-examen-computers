@@ -15,6 +15,7 @@ import urllib.request
 sys.path.insert(0, "/usr/local/lib/digital-examen")
 
 import de_common
+import de_mass_commands
 import de_tabs
 
 URL = de_common.setting("DE_SCREEN_URL")
@@ -26,6 +27,7 @@ WAIT = 25
 EXEC_TIMEOUT = int(de_common.setting("DE_AGENT_EXEC_TIMEOUT", "30"))
 STATS_INTERVAL = 5
 HEARTBEAT_INTERVAL = 20
+COMMAND_SIGNAL = threading.Event()
 
 
 def log(message):
@@ -210,8 +212,12 @@ def stats_loop():
             policy = json.loads(de_common.read_file(POLICY_FILE) or "{}")
             groups = policy.get("groups", [])
             rules = list(dict.fromkeys(rule for group in groups for rule in group.get("tab_titles", [])))
-            url_groups = [{"allow": group.get("url_allow", []), "deny": group.get("url_denied", [])}
-                          for group in groups if group.get("url_allow") or group.get("url_denied")]
+            url_groups = [{
+                "allow": group.get("url_allow", []),
+                "deny": group.get("url_denied", []),
+                "domains": group.get("always_allow", []),
+            } for group in groups
+                if group.get("url_allow") or group.get("url_denied") or group.get("always_allow")]
         except (ValueError, TypeError):
             rules, url_groups = [], []
         admin = login and de_common.is_admin(login)
@@ -246,6 +252,8 @@ def save_heartbeat_policy(answer):
 
 
 def heartbeat_loop():
+    boot = next((int(line.split()[1]) for line in de_common.read_file("/proc/stat").splitlines()
+                 if line.startswith("btime ")), None)
     last_conflict = ""
     while True:
         hostname = socket.gethostname()
@@ -253,7 +261,8 @@ def heartbeat_loop():
         target = "%dk-%d-%d" % place if place else COMPUTER
         moved = target != COMPUTER
         url = API.rstrip("/") + "/api/computers/device/heartbeat"
-        payload = {"computer": COMPUTER, "online": True, "login": de_common.current_user()}
+        payload = {"computer": COMPUTER, "online": True, "login": de_common.current_user(),
+                   "boot": boot, "command_jobs": True}
         if place:
             payload.update(hostname=hostname, sync_screen=moved)
         try:
@@ -273,7 +282,15 @@ def heartbeat_loop():
                     raise
                 payload["computer"] = target
                 answer = de_common.send_json(url, payload, "proxy", 15, identity=target)
+            if answer.get("remove_agent") is True and answer.get("computer") == COMPUTER:
+                subprocess.run([
+                    "systemd-run", "--unit=de-agent-removal", "--collect", "/bin/sh",
+                    "/opt/digital-examen-computers/delete.sh",
+                ], check=True)
+                return
             save_heartbeat_policy(answer)
+            if answer.get("command_pending") is True:
+                COMMAND_SIGNAL.set()
             last_conflict = ""
             if moved and answer.get("computer") == target and answer.get("screen_ready"):
                 de_common.write_place(target, place)
@@ -293,6 +310,38 @@ def heartbeat_loop():
         time.sleep(HEARTBEAT_INTERVAL)
 
 
+def command_jobs_loop():
+    endpoint = API.rstrip("/") + "/api/computers/device/command-jobs/"
+    result = None
+    while True:
+        if result is None:
+            COMMAND_SIGNAL.wait()
+            COMMAND_SIGNAL.clear()
+        try:
+            if result is not None:
+                de_common.send_json(endpoint + "result", result, "proxy", 10)
+                result = None
+            job = de_common.send_json(endpoint + "next", {}, "proxy", 10)
+            if job.get("id"):
+                command = str(job.get("command", ""))
+                try:
+                    code, output = de_mass_commands.execute(command, int(job["id"]))
+                except (OSError, ValueError) as error:
+                    code, output = 1, str(error)
+                if code is not None:
+                    result = {"target_id": job["id"], "code": code if 0 <= code <= 255 else 1,
+                              "awaiting_reboot": command == "reboot" and code == 0,
+                              "output": output.replace("\0", "")[:20000]}
+                continue
+        except urllib.error.HTTPError as error:
+            if error.code in (403, 404, 422):
+                result = None
+        except (OSError, ValueError):
+            pass
+        time.sleep(10)
+
+
+
 def main():
     if not URL or not COMPUTER:
         log("компьютер не на учёте, агент ждёт")
@@ -304,6 +353,7 @@ def main():
     threading.Thread(target=stats_loop, daemon=True).start()
     if API:
         threading.Thread(target=heartbeat_loop, daemon=True).start()
+        threading.Thread(target=command_jobs_loop, daemon=True).start()
 
     while True:
         try:

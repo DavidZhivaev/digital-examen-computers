@@ -1,0 +1,117 @@
+#!/usr/bin/python3
+
+import argparse
+import getpass
+import hashlib
+import itertools
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import subprocess
+import sys
+import time
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+API = "https://ex.1580.ru/api"
+RUNTIME = Path("/run/user") / str(os.getuid())
+CACHE = RUNTIME / "digital-examen-cli"
+
+
+def request(path, body=None, token=None):
+    headers = {"User-Agent": "Digital-Examen-de"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    data = json.dumps(body).encode() if body is not None else None
+    outgoing = Request(API + path, data, headers)
+    if token:
+        outgoing.add_unredirected_header("Authorization", "Bearer " + token)
+    with urlopen(outgoing, timeout=15) as answer:
+        return json.load(answer)
+
+
+def login():
+    username = input("Логин сайта: ").strip()
+    password = getpass.getpass("Пароль сайта: ")
+    challenge = request("/auth/pow/challenge", {"platform": "desktop"})
+    challenge_id = challenge["challenge_id"]
+    prefix = (challenge_id + challenge["nonce"]).encode()
+    difficulty = int(challenge["difficulty"])
+    if not 0 <= difficulty <= 26:
+        raise ValueError("Неизвестный формат проверки входа")
+    for number in itertools.count():
+        solution = str(number)
+        digest = hashlib.sha256(prefix + solution.encode()).digest()
+        if not int.from_bytes(digest, "big") >> (256 - difficulty):
+            break
+        if number % 4096 == 0 and time.time() >= challenge["expires_at"]:
+            raise ValueError("Время проверки входа истекло")
+    session = request("/auth/login", {
+        "login": username, "password": password, "device_name": socket.gethostname() + " · de",
+        "pow_challenge_id": challenge_id, "pow_solution": solution,
+    })
+    return request("/computers/cli/session", {}, session["access_token"])["access_token"]
+
+
+def computer(name):
+    path = "/computers/cli/computers/" + name
+    if CACHE.is_file():
+        try:
+            return request(path, token=CACHE.read_text())
+        except HTTPError as error:
+            if error.code not in (401, 403):
+                raise
+            CACHE.unlink(missing_ok=True)
+    token = login()
+    try:
+        if RUNTIME.stat().st_uid == os.getuid():
+            descriptor = os.open(CACHE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "w") as output:
+                output.write(token)
+    except OSError:
+        pass
+    return request(path, token=token)
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="de")
+    commands = parser.add_subparsers(dest="action", required=True)
+    commands.add_parser("list")
+    commands.add_parser("status")
+    commands.add_parser("ssh").add_argument("computer")
+    args = parser.parse_args()
+    if args.action == "ssh":
+        name = args.computer
+    else:
+        place = re.fullmatch(r"m1580-(\d+)-(\d+)-(\d+)", socket.gethostname())
+        if place is None:
+            raise ValueError("Имя этого компьютера не соответствует формату m1580-корпус-аудитория-номер")
+        name = "%dk-%d-%d" % tuple(map(int, place.groups()))
+    if not re.fullmatch(r"\d{1,2}k-\d{1,4}-\d{1,3}", name):
+        raise ValueError("Введите имя компьютера в формате 1k-100-1")
+
+    data = computer(name)
+    if args.action == "ssh":
+        os.execvp("ssh", ["ssh", "--", data["hostname"]])
+    elif args.action == "list":
+        print(json.dumps(data["policy"]["groups"], ensure_ascii=False, indent=2))
+    else:
+        print(data["name"], "Включён" if data["online"] else "Выключен")
+        print("Последний сигнал", data["last_seen"] or "нет данных", flush=True)
+        subprocess.call(["systemctl", "show", "--property=Id,ActiveState,SubState",
+                         "de-agent.service", "de-net.service", "de-inspect.service", "de-update.timer"])
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except HTTPError as error:
+        try:
+            message = json.load(error).get("detail", "")
+        except ValueError:
+            message = ""
+        sys.exit(str(message or error))
+    except (OSError, ValueError, EOFError) as error:
+        sys.exit(str(error))

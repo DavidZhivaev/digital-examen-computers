@@ -49,12 +49,22 @@ function matchesList(url, { included, excluded }) {
     && !excluded.some(parts => matchesParts(url, parts))
 }
 
-function blockedUrl(url) {
-  for (const { allow, deny } of urlGroups) {
-    if (matchesList(url, allow)) return false
-    if (matchesList(url, deny)) return true
+function allowedUrl(url) {
+  const host = new URL(url).hostname.toLowerCase().replace(/\.$/, '')
+  const matchesHost = (pattern) => {
+    if (pattern === '*') return true
+    const tail = pattern.replace(/^\*?\./, '')
+    return host === tail || (tail !== pattern && host.endsWith('.' + tail))
   }
-  return false
+  return urlGroups.some(({ allow, domains }) => (
+    matchesList(url, allow)
+    || (domains.some((pattern) => !pattern.startsWith('!') && matchesHost(pattern))
+        && !domains.some((pattern) => pattern.startsWith('!') && matchesHost(pattern.slice(1))))
+  ))
+}
+
+function blockedUrl(url) {
+  return !allowedUrl(url) && urlGroups.some(({ deny }) => matchesList(url, deny))
 }
 
 function checkRequest({ url }) {
@@ -68,9 +78,9 @@ function requestFilter(pattern) {
 
 function setUrlGroups(groups) {
   const positive = groups.flatMap(group => group.deny.filter(line => !line.startsWith('!')))
-  urlGroups = positive.length ? groups.map(({ allow, deny }) => ({
-    allow: compilePatterns(allow), deny: compilePatterns(deny),
-  })) : []
+  urlGroups = groups.map(({ allow, deny, domains }) => ({
+    allow: compilePatterns(allow), deny: compilePatterns(deny), domains: Array.isArray(domains) ? domains : [],
+  }))
   const filters = [...new Set(positive.map(requestFilter))]
   const urls = filters.includes('*://*/*') ? ['*://*/*'] : filters
   const signature = urls.join(' ')
@@ -85,6 +95,17 @@ function prohibited(title) {
   return rules.some(rule => title.toLowerCase().includes(rule.toLowerCase()))
 }
 
+function shouldClose(tab) {
+  if (!schoolSession || !/^https?:/.test(tab.url ?? '') || allowedUrl(tab.url)) return false
+  return urlGroups.some(({ deny }) => matchesList(tab.url, deny)) || Boolean(tab.title && prohibited(tab.title))
+}
+
+api.tabs.onUpdated.addListener((id, change, tab) => {
+  if ((change.title !== undefined || change.url !== undefined) && shouldClose(tab)) {
+    api.tabs.remove(id).catch(() => {})
+  }
+})
+
 async function sync() {
   if (!port || busy) return
   busy = true
@@ -93,7 +114,7 @@ async function sync() {
     const next = new Map()
     for (const tab of snapshots) {
       if (!/^https?:/.test(tab.url ?? '')) continue
-      if ((urlGroups.length && blockedUrl(tab.url)) || (tab.title && prohibited(tab.title))) {
+      if (shouldClose(tab)) {
         await api.tabs.remove(tab.id).catch(() => {})
         continue
       }

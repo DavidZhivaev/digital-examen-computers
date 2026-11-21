@@ -16,9 +16,15 @@ if [ -e /etc/sddm.conf.d/90-digital-examen.conf ] ||
 fi
 
 if [ "$here" != "$repo" ]; then
-    [ ! -e "$repo" ] || { echo "Запустите $repo/setup.sh" >&2; exit 1; }
-    git clone --no-local -- "$here" "$repo"
-    git -C "$repo" remote set-url origin https://github.com/DavidZhivaev/digital-examen-computers.git
+    key="$(dirname -- "$here")/de-key.txt"
+    if [ -f "$key" ] && [ ! -L "$key" ]; then
+        export DE_INSTALL_KEY="$key"
+    fi
+    if [ ! -d "$repo/.git" ]; then
+        [ ! -e "$repo" ] || { echo "Каталог $repo уже занят" >&2; exit 1; }
+        git -c safe.directory="$here" clone --no-local -- "$here" "$repo"
+        git -C "$repo" remote set-url origin https://github.com/DavidZhivaev/digital-examen-computers.git
+    fi
     exec sh "$repo/setup.sh" "$@"
 fi
 
@@ -35,11 +41,11 @@ put() {
 for module in "$here"/pylib/de_*.py; do
     put 0644 "$module" "/usr/local/lib/digital-examen/${module##*/}"
 done
-for script in "$here"/bin/de-*; do
+for script in "$here"/bin/de "$here"/bin/de-*; do
     name=${script##*/}
     case "$name" in
         de-deps) ;;
-        de-note-command|de-tabs-native) put 0755 "$script" "/usr/local/bin/$name" ;;
+        de|de-note-command|de-tabs-native) put 0755 "$script" "/usr/local/bin/$name" ;;
         *) put 0750 "$script" "/usr/local/sbin/$name" ;;
     esac
 done
@@ -59,14 +65,13 @@ for native in /usr/lib/mozilla/native-messaging-hosts /usr/lib64/mozilla/native-
     put 0644 "$here/browser/tabs/native-firefox.json" "$native/ru.digital_examen.tabs.json"
 done
 
-
 if [ ! -f "$config" ]; then
     install -m 0640 "$here/config/computers.conf.example" "$config"
 fi
 
 if ! grep -Eq '^DE_COMPUTER_ID="?[^"]+"?$' "$config"; then
     [ "${1:-}" != --update ] || { echo "Компьютер не зарегистрирован" >&2; exit 1; }
-    /usr/local/sbin/de-init
+    /usr/local/sbin/de-init "${DE_INSTALL_KEY:-}"
 fi
 
 enabled=
@@ -85,21 +90,33 @@ if [ -f "$state/installed-files" ]; then
                 systemctl disable --now "${path##*/}"
                 unlink "$path"
                 ;;
-            /usr/local/sbin/de-*|/usr/local/bin/de-note-command|/usr/local/bin/de-tabs-native|/etc/*/native-messaging-hosts/ru.digital_examen.tabs.json|/etc/*/policies/managed/digital-examen-tabs.json|/usr/lib*/mozilla/native-messaging-hosts/ru.digital_examen.tabs.json|/usr/local/lib/digital-examen/de_*.py|/etc/profile.d/de-history.sh)
+            /usr/local/sbin/de-*|/usr/local/bin/de|/usr/local/bin/de-note-command|/usr/local/bin/de-tabs-native|/etc/*/native-messaging-hosts/ru.digital_examen.tabs.json|/etc/*/policies/managed/digital-examen-tabs.json|/usr/lib*/mozilla/native-messaging-hosts/ru.digital_examen.tabs.json|/usr/local/lib/digital-examen/de_*.py|/etc/profile.d/de-history.sh)
                 [ ! -f "$path" ] || unlink "$path"
                 ;;
         esac
     done < "$state/installed-files"
 fi
 
+if [ "${1:-}" != --update ]; then
+    PYTHONPATH=/usr/local/lib/digital-examen /usr/bin/python3 -c 'import sys, de_migrations; de_migrations.initialize(sys.argv[1])' "$repo"
+fi
+PYTHONPATH=/usr/local/lib/digital-examen /usr/bin/python3 -m de_firefox_policy install
 systemctl daemon-reload
 systemctl enable $enabled
 for unit in $enabled; do
     case "$unit" in
         *.service) systemctl restart "$unit" ;;
+        de-update.timer)
+            if [ "${1:-}" = --update ]; then systemctl restart "$unit"; fi
+            ;;
         *.timer) systemctl start "$unit" ;;
     esac
 done
 mv -f "$manifest" "$state/installed-files"
 git -C "$repo" rev-parse HEAD > "$state/installed-revision.new"
 mv -f "$state/installed-revision.new" "$state/installed-revision"
+
+if [ "${1:-}" != --update ]; then
+    echo "Установка завершена. Перезагрузка компьютера."
+    systemctl --no-block reboot
+fi

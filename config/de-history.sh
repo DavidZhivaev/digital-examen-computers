@@ -1,8 +1,9 @@
 if [ -n "$BASH_VERSION" ] && [ -x /usr/local/bin/de-note-command ]; then
     de_note_last_command() {
-        de_last=`history 1 2>/dev/null | sed 's/^ *[0-9]* *//'`
-        if [ -n "$de_last" ] && [ "$de_last" != "$de_previous" ]; then
-            de_previous="$de_last"
+        de_entry=$(history 1 2>/dev/null)
+        if [ -n "$de_entry" ] && [ "$de_entry" != "$de_previous" ]; then
+            de_previous="$de_entry"
+            de_last=$(printf '%s\n' "$de_entry" | sed '1s/^ *[0-9]* *//')
             /usr/local/bin/de-note-command "$de_last" >/dev/null 2>&1
         fi
     }
