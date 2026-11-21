@@ -19,6 +19,13 @@ def blocked():
     })
 
 
+def block_response_headers(flow):
+    response = blocked()
+    chunks = iter(([response.raw_content],) if flow.request.method != "HEAD" else ())
+    response.stream = lambda _: next(chunks, [])
+    flow.response = response
+
+
 MANAGEMENT_HOST = urlsplit(de_common.setting("DE_API_URL", "https://ex.1580.ru")).hostname
 GROUP_CONFIG_PATH = re.compile(r"/api/computers/groups(?:/[0-9]+(?:/save)?)?/?$")
 
@@ -69,15 +76,17 @@ def ai_url(url):
     parts = urlsplit(url)
     host = inspection.host_name(parts.hostname or "")
     path = parts.path.lower().rstrip("/")
-    query = parse_qs(parts.query)
     if host.startswith("www."):
         host = host[4:]
     if host in {"ya.ru", "yandex.ru", "yandex.com", "alice.yandex.ru", "alice.yandex.com"}:
-        return (host.startswith("alice.") or path == "/alice" or path.startswith("/alice/")
-                or (path == "/search" and (bool(set(query.get("mode", ())) & {"ai", "alice", "neuro"})
-                     or "force_neuro" in query.get("promo", ()))))
+        if host.startswith("alice.") or path == "/alice" or path.startswith("/alice/"):
+            return True
+        if path != "/search":
+            return False
+        query = parse_qs(parts.query)
+        return bool(set(query.get("mode", ())) & {"ai", "alice", "neuro"}) or "force_neuro" in query.get("promo", ())
     if inspection.google_search_host(host):
-        return path in {"/ai", "/aimode"} or (path == "/search" and "50" in query.get("udm", ()))
+        return path in {"/ai", "/aimode"} or (path == "/search" and "50" in parse_qs(parts.query).get("udm", ()))
     return host in {"gemini.google.com", "aistudio.google.com"}
 
 
@@ -130,14 +139,14 @@ def request(flow):
     if not rules:
         return
     domain_blocked = inspection.url_blocked(request.host, request.pretty_url, rules)
-    cached_ai_block = (flow.client_conn.id in AI_BLOCKED_CONNECTIONS
+    ai_enabled = any(rule.get("ai_auto") for rule in rules)
+    cached_ai_block = (ai_enabled and flow.client_conn.id in AI_BLOCKED_CONNECTIONS
                        and not inspection.url_allowed(request.host, request.pretty_url, rules))
     if domain_blocked or cached_ai_block:
         flow.response = blocked()
         return
     if not scans_content(request, rules):
         return
-    ai_enabled = any(rule.get("ai_auto") for rule in rules)
     if ai_enabled and ai_request(request):
         flow.response = blocked()
         return
@@ -172,7 +181,7 @@ def responseheaders(flow):
         if host and (inspection.url_blocked(host, target, rules)
                      or (not inspection.url_allowed(host, target, rules)
                          and any(rule.get("ai_auto") for rule in rules) and ai_url(target))):
-            flow.response = blocked()
+            block_response_headers(flow)
             return
     if not inspection.content_terms(rules):
         if not yandex_html(flow) or before.stream or not small_yandex_page(before):
@@ -186,13 +195,19 @@ def responseheaders(flow):
     if not limit:
         before.stream = True
         return
-    if before.stream and before.headers.get("content-encoding", "identity").lower() in ("", "identity"):
+    if (flow.request.method != "HEAD" and before.status_code >= 200 and before.status_code not in (204, 304)
+            and (before.stream or "content-length" not in before.headers)):
         header = response_text(before, b"")
-        limit = inspection.JS_LIMIT if limit == inspection.JS_LIMIT else 3 * 65536
-        before.stream = inspection.StreamPrefix(limit, lambda prefix: inspection.matches_content(
-            [header + prefix], rules,
+        encoding = before.headers.get("content-encoding", "identity").lower()
+        prefix_limit = 3 * 65536 if limit == inspection.MAX_BODY and encoding in ("", "identity") else limit
+        prefix_filter = inspection.StreamPrefix(prefix_limit, lambda prefix: inspection.matches_content(
+            [header + inspection.text_prefix(prefix, encoding, prefix_limit)], rules,
         ))
-        stream_yandex_style(flow)
+        before.headers.pop("content-length", None)
+        if flow.client_conn.alpn != b"h2":
+            before.headers["transfer-encoding"] = "chunked"
+        before.stream = inspection.stream_chunks(prefix_filter)
+        stream_yandex_style(flow, prefix_filter)
 
 
 def yandex_html(flow):
@@ -222,10 +237,10 @@ def add_yandex_style_headers(reply):
         reply.headers.pop(key, None)
 
 
-def stream_yandex_style(flow):
+def stream_yandex_style(flow, inner=True):
     if yandex_html(flow):
         add_yandex_style_headers(flow.response)
-        flow.response.stream = inspection.YandexStyleStream(flow.response.stream)
+        flow.response.stream = inspection.stream_chunks(inspection.YandexStyleStream(inner))
 
 
 def response(flow):
@@ -247,7 +262,10 @@ def scan_response(flow, body):
     reply = flow.response
     raw = response_text(reply, text_body(reply) if body else b"")
     if inspection.matches_content([raw], rules):
-        flow.response = blocked()
+        if body:
+            flow.response = blocked()
+        else:
+            block_response_headers(flow)
 
 
 def response_text(reply, body):

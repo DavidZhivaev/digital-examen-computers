@@ -111,6 +111,13 @@ class StreamPrefix:
         return prefix + chunk[taken:]
 
 
+def stream_chunks(transform):
+    def chunks(chunk):
+        data = transform(chunk)
+        return [data] if data else []
+    return chunks
+
+
 def block_page():
     for page in (Path("/etc/digital-examen/block.html"),
                  Path("/opt/digital-examen-computers/config/block.html"),
@@ -122,11 +129,31 @@ def block_page():
     return "<h1>Сайт закрыт ограничениями школы</h1>".encode()
 
 
+URL_WITH_HOST = re.compile(r"(?:(https?)://)?((?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+)(:\d+)?(?=[/?#]|$)", re.I)
+
+
 def url_matches(patterns, target):
     def matches(pattern):
+        value = target
+        address = URL_WITH_HOST.match(pattern)
+        if address:
+            scheme, host, port = address.groups()
+            try:
+                url = urlsplit(target)
+                target_port = url.port or (443 if url.scheme == "https" else 80)
+            except ValueError:
+                return False
+            if (not de_patterns.host_matches(host, url.hostname or "")
+                    or scheme and scheme.lower() != url.scheme
+                    or port and int(port[1:]) != target_port):
+                return False
+            value = url.path + ("?" + url.query if url.query else "")
+            pattern = pattern[address.end():]
+            if not value.startswith(pattern.split("*", 1)[0]):
+                return False
         offset = 0
         for part in pattern.split("*"):
-            offset = target.find(part, offset)
+            offset = value.find(part, offset)
             if offset < 0:
                 return False
             offset += len(part)
@@ -184,7 +211,8 @@ JS_TYPES = frozenset({"application/javascript", "text/javascript", "application/
 
 def body_scan_limit(content_type, length=None):
     mime = content_type.partition(";")[0].strip().lower()
-    if (mime in {"text/html", "application/json", "text/json", "application/x-ndjson", "application/xml", "text/xml"}
+    if (mime in {"text/html", "text/plain", "application/json", "text/json",
+                 "application/x-ndjson", "application/xml", "text/xml"}
             or mime.endswith(("+json", "+xml")) and not mime.startswith("image/")):
         return MAX_BODY
     if mime in JS_TYPES and length is not None:
@@ -237,7 +265,7 @@ def google_web_search_path(host, path):
 YANDEX_SEARCH_HOSTS = frozenset({"ya.ru", "www.ya.ru", "yandex.ru", "www.yandex.ru",
                                 "yandex.com", "www.yandex.com"})
 YANDEX_SEARCH_STYLE = (
-    b'li.serp-item.serp-item__futuris-snippet,'
+    b'li[class*="__futuris-snippet"],'
     b'a.HeaderNav-Tab[href*="promo=force_neuro"]{display:none!important}'
 )
 YANDEX_STYLE_TAG = b"<style>" + YANDEX_SEARCH_STYLE + b"</style>"
@@ -299,7 +327,7 @@ class YandexResultFilter(HTMLParser):
             return
         attributes = dict(attrs)
         classes = set((attributes.get("class") or "").split())
-        snippet = tag == "li" and {"serp-item", "serp-item__futuris-snippet"} <= classes
+        snippet = tag == "li" and any("futuris-snippet" in name for name in classes)
         tab = (tag == "a" and "HeaderNav-Tab" in classes
                and "promo=force_neuro" in (attributes.get("href") or ""))
         if snippet or tab:

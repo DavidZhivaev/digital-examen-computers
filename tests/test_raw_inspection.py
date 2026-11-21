@@ -58,6 +58,13 @@ class RawInspectionTests(unittest.TestCase):
                 "yandex.ru", "https://yandex.ru/search/?text=" + query, rules
             ))
 
+    def test_full_url_rule_matches_origin_instead_of_a_url_in_the_query(self):
+        blocked = relay.de_inspection.url_blocked
+        rules = [{"principle": "allow", "url_allow": ["https://*.1580.ru/login/*"]}]
+        self.assertFalse(blocked("sdo.1580.ru", "https://sdo.1580.ru/login/index.php?next=/", rules))
+        self.assertTrue(blocked("other.example", "https://other.example/?next=https://sdo.1580.ru/login/", rules))
+        self.assertTrue(blocked("sdo.1580.ru", "https://sdo.1580.ru/help?next=/login/", rules))
+
     def test_encoded_request_and_compressed_response_can_match(self):
         rules = [{"request_allow": ["ИИ"], "request_deny": ["Режим ИИ"]}]
         encoded = b"GET /?text=%D0%A0%D0%B5%D0%B6%D0%B8%D0%BC+%D0%98%D0%98"
@@ -113,6 +120,20 @@ class RawInspectionTests(unittest.TestCase):
         inline_policy = "style-src 'unsafe-inline'; script-src 'none'"
         self.assertEqual(inspection.yandex_style_policy(inline_policy), inline_policy)
 
+    def test_stream_does_not_emit_empty_http_chunks_while_waiting_for_prefix(self):
+        inspection = relay.de_inspection
+        prefix = inspection.StreamPrefix(8, lambda data: b"deny" in data)
+        transform = inspection.stream_chunks(prefix)
+        self.assertEqual(transform(b"de"), [])
+        self.assertEqual(transform(b"ny rest"), [])
+        self.assertEqual(transform(b""), [])
+
+        transform = inspection.stream_chunks(inspection.YandexStyleStream(True))
+        self.assertEqual(transform(b"<!doc"), [])
+        parts = transform(b"type html><body>links")
+        self.assertEqual(parts, [b"<!doctype html>" + inspection.YANDEX_STYLE_TAG + b"<body>links"])
+        self.assertEqual(transform(b""), [])
+
 
     def test_yandex_only_removes_complete_answer_nodes_and_keeps_the_results_shell(self):
         inspection = relay.de_inspection
@@ -137,12 +158,22 @@ class RawInspectionTests(unittest.TestCase):
         malformed = b'<li class="serp-item serp-item__futuris-snippet"><a>ordinary results</a>'
         self.assertIn(b"<a>ordinary results</a>", inspection.filter_yandex_html(malformed))
 
+    def test_yandex_new_hashed_ai_class_is_removed(self):
+        inspection = relay.de_inspection
+        page = (b'<div class="FuturisSearchWrapper"><li class="ym2fgR1955MWD '
+                b'ym2fgR1955MWD__futuris-snippet"><div>AI answer</div></li>'
+                b'<li class="ordinary-result"><a>normal result</a></li></div>')
+        filtered = inspection.filter_yandex_html(page)
+        self.assertNotIn(b"AI answer", filtered)
+        self.assertIn(b"normal result", filtered)
+        self.assertIn(b'li[class*="__futuris-snippet"]', inspection.YANDEX_STYLE_TAG)
+
     def test_body_mime_and_js_size_filter(self):
         inspection = relay.de_inspection
-        for mime in ("text/html; charset=utf-8", "application/vnd.example+json",
+        for mime in ("text/html; charset=utf-8", "text/plain", "application/vnd.example+json",
                      "application/xml", "application/xhtml+xml"):
             self.assertEqual(inspection.body_scan_limit(mime), inspection.MAX_BODY)
-        for mime in ("text/css", "image/svg+xml", "application/pdf", "text/plain"):
+        for mime in ("text/css", "image/svg+xml", "application/pdf"):
             self.assertEqual(inspection.body_scan_limit(mime, 100), 0)
         self.assertEqual(inspection.body_scan_limit("application/javascript", "32768"), 32768)
         self.assertEqual(inspection.body_scan_limit("text/javascript", "32769"), 0)
