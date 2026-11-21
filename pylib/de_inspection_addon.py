@@ -224,7 +224,7 @@ def response(flow):
         scan_response(flow, body=True)
         if flow.response is before and yandex_html(flow) and before.raw_content:
             add_yandex_style_headers(before)
-            before.raw_content = inspection.insert_yandex_style(before.raw_content)
+            before.raw_content = inspection.filter_yandex_html(before.raw_content)
 
 
 def scan_response(flow, body):

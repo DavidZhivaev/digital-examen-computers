@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import zlib
 import html
+from html.parser import HTMLParser
 import re
 from urllib.parse import parse_qs, parse_qsl, unquote_plus, urlencode, urlsplit
 
@@ -255,14 +256,77 @@ def insert_yandex_style(html_body):
     return html_body[:index] + YANDEX_STYLE_TAG + html_body[index:]
 
 
+class YandexResultFilter(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.output = bytearray()
+        self.hidden_tag = None
+        self.depth = 0
+        self.mask_token = False
+
+    def is_ai_element(self, tag, attrs):
+        attributes = dict(attrs)
+        classes = set((attributes.get("class") or "").split())
+        if classes & {"FuturisSearchWrapper", "serp-item__futuris-snippet"}:
+            return True
+        return (tag == "a" and "HeaderNav-Tab" in classes
+                and "promo=force_neuro" in (attributes.get("href") or ""))
+
+    def handle_starttag(self, tag, attrs):
+        if self.depth:
+            if tag == self.hidden_tag:
+                self.depth += 1
+        elif self.is_ai_element(tag, attrs):
+            if tag in {"area", "base", "br", "col", "embed", "hr", "img", "input",
+                       "link", "meta", "param", "source", "track", "wbr"}:
+                self.mask_token = True
+            else:
+                self.hidden_tag = tag
+                self.depth = 1
+
+    def handle_startendtag(self, tag, attrs):
+        self.mask_token = self.is_ai_element(tag, attrs)
+
+    def handle_endtag(self, tag):
+        if self.depth and tag == self.hidden_tag:
+            self.depth -= 1
+            self.mask_token = True
+
+    def updatepos(self, start, end):
+        if end > start:
+            if self.depth or self.mask_token:
+                self.output.extend(b" " * (end - start))
+            else:
+                self.output.extend(self.rawdata[start:end].encode("latin-1"))
+            self.mask_token = False
+        return super().updatepos(start, end)
+
+    def filter_chunk(self, data, final=False):
+        self.feed(data.decode("latin-1"))
+        if final:
+            self.close()
+            if self.rawdata:
+                self.updatepos(0, len(self.rawdata))
+                self.rawdata = ""
+        output = bytes(self.output)
+        self.output.clear()
+        return output
+
+
+def filter_yandex_html(body):
+    return insert_yandex_style(YandexResultFilter().filter_chunk(body, final=True))
+
+
 class YandexStyleStream:
     def __init__(self, inner):
         self.inner = inner
         self.pending = bytearray()
         self.done = False
+        self.filter = YandexResultFilter()
 
     def __call__(self, chunk):
         data = self.inner(chunk) if callable(self.inner) else chunk
+        data = self.filter.filter_chunk(data, final=not chunk)
         if self.done:
             return data
         self.pending.extend(data)

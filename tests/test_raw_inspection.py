@@ -112,3 +112,24 @@ class RawInspectionTests(unittest.TestCase):
         self.assertTrue(result.endswith("style-src-elem " + inspection.YANDEX_STYLE_HASH))
         inline_policy = "style-src 'unsafe-inline'; script-src 'none'"
         self.assertEqual(inspection.yandex_style_policy(inline_policy), inline_policy)
+
+
+    def test_yandex_embedded_ai_answer_is_removed_from_buffered_and_chunked_html(self):
+        inspection = relay.de_inspection
+        page = (
+            '<!doctype html><html><head></head><body>'
+            '<div class="FuturisSearchWrapper"><div>Скрытый ответ ИИ</div>'
+            '<img src="answer.png"><script>var ai="privateAnswer";</script></div>'
+            '<li class="serp-item__futuris-snippet">AI result</li>'
+            '<a class="HeaderNav-Tab" href="/search?promo=force_neuro">Алиса</a>'
+            '<a href="/ordinary">Обычная ссылка</a></body></html>'
+        ).encode()
+        buffered = inspection.filter_yandex_html(page)
+        stream = inspection.YandexStyleStream(True)
+        streamed = b"".join(stream(page[i:i + 7]) for i in range(0, len(page), 7)) + stream(b"")
+        for result in (buffered, streamed):
+            self.assertEqual(len(result), len(page) + len(inspection.YANDEX_STYLE_TAG))
+            self.assertNotIn("Скрытый ответ ИИ".encode(), result)
+            self.assertNotIn(b"privateAnswer", result)
+            self.assertNotIn(b"AI result", result)
+            self.assertIn("Обычная ссылка".encode(), result)
