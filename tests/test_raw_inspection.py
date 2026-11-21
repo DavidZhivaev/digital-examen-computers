@@ -3,6 +3,7 @@ from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
 from io import StringIO
 from builtins import open as real_open
+import gzip
 import socket
 import sys
 import unittest
@@ -44,3 +45,19 @@ class RawInspectionTests(unittest.TestCase):
                         page = response.read()
                     self.assertEqual(page.split()[1], status)
                     self.assertEqual(body in page, status == b"200")
+
+
+    def test_search_queries_follow_same_url_whitelist(self):
+        rules = [{"principle": "allow", "url_allow": ["yandex.ru/search*"]}]
+        for query in ("123", "321"):
+            self.assertFalse(relay.de_inspection.url_blocked(
+                "yandex.ru", "https://yandex.ru/search/?text=" + query, rules
+            ))
+
+    def test_encoded_request_and_compressed_response_can_match(self):
+        rules = [{"request_allow": ["ИИ"], "request_deny": ["Режим ИИ"]}]
+        encoded = b"GET /?text=%D0%A0%D0%B5%D0%B6%D0%B8%D0%BC+%D0%98%D0%98"
+        compressed = gzip.compress("Режим ИИ".encode())
+        self.assertTrue(relay.de_inspection.matches_content([encoded], rules))
+        prefix = relay.de_inspection.text_prefix(compressed, "gzip")
+        self.assertTrue(relay.de_inspection.matches_content([prefix], rules))

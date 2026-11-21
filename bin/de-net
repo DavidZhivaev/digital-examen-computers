@@ -48,16 +48,11 @@ LOCK = threading.Lock()
 PEOPLE = set()
 EXPECTED_RULES = None
 
-BLOCKED_BODY = (
-    "<html><head><meta charset=\"utf-8\"><title>Закрыто</title></head>"
-    "<body style=\"font-family:sans-serif;text-align:center;margin-top:20vh\">"
-    "<h1>Сайт закрыт ограничениями школы</h1></body></html>"
-).encode("utf-8")
-BLOCKED = (
-    b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/html; charset=utf-8\r\n"
-    b"Content-Length: " + str(len(BLOCKED_BODY)).encode() + b"\r\nConnection: close\r\n\r\n"
-    + BLOCKED_BODY
-)
+def blocked_response():
+    body = de_inspection.block_page()
+    return (b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/html; charset=utf-8\r\n"
+            b"Cache-Control: no-store\r\nContent-Length: " + str(len(body)).encode()
+            + b"\r\nConnection: close\r\n\r\n" + body)
 
 
 def log(message):
@@ -259,13 +254,13 @@ def decide(host):
     for group in groups:
         name = group.get("name", "")
         if group.get("ai_auto") and de_patterns.any_match(AI_HOSTS, host):
-            return "block", name
+            return "ai_block", name
         if group.get("principle") == "allow":
             return "block", name
         if de_patterns.any_match(group.get("denied"), host):
             return "block", name
         if group.get("ai_auto") and ask_ai(host):
-            return "block", name
+            return "ai_block", name
     return "pass", ""
 
 
@@ -448,8 +443,8 @@ def inspect_http(client, upstream, data, host, port):
         body.extend(chunk)
         remaining -= len(chunk)
     rules = de_inspection.groups.get()
-    if de_inspection.matches_content([head, body], rules):
-        client.sendall(BLOCKED)
+    if de_inspection.url_blocked(host, target=payload.split(b" ", 2)[1].decode("ascii"), rules=rules) or de_inspection.matches_content([head, body], rules):
+        client.sendall(blocked_response())
         return True
     first, *headers = head.split(b"\r\n")
     method, target, version = first.split()
@@ -470,10 +465,10 @@ def inspect_http(client, upstream, data, host, port):
         content_type = reply.headers.get_content_type()
         encoding = reply.headers.get("Content-Encoding", "identity").lower()
         text = content_type.startswith("text/") or content_type.endswith(("json", "xml", "javascript"))
-        inspected = prefix if text and encoding == "identity" else b""
+        inspected = de_inspection.text_prefix(prefix, encoding) if text else b""
         if de_inspection.matches_content(
                 [head, body, (status + "\r\n" + response_headers).encode("latin-1"), inspected], rules):
-            client.sendall(BLOCKED)
+            client.sendall(blocked_response())
             return True
         excluded = {"connection", "transfer-encoding", "trailer", "upgrade", "keep-alive"}
         excluded.update(name.strip().lower() for name in reply.headers.get("Connection", "").split(","))
@@ -531,11 +526,14 @@ class Handler(socketserver.BaseRequestHandler):
             return
 
         verdict, group = decide(host)
-        if verdict == "block":
+        inspect_tls = port == 443 and de_inspection.host_name(host) in de_inspection.hosts.get()
+        if verdict != "pass" and not inspect_tls and (
+                verdict == "ai_block" or port != 80 or group not in {rule.get("name") for rule in de_inspection.groups.get()
+                                            if rule.get("url_allow")}):
             note_block(host, login, group)
             if not secure:
                 try:
-                    client.sendall(BLOCKED)
+                    client.sendall(blocked_response())
                 except OSError:
                     pass
             return
@@ -549,10 +547,11 @@ class Handler(socketserver.BaseRequestHandler):
             if sni_of(data).rstrip(".") != host.rstrip("."):
                 return
         try:
-            if port == 443 and group == "":
+            if port == 443 and inspect_tls:
                 upstream = socket.create_connection(("127.0.0.1", de_inspection.LISTEN_PORT), timeout=3)
                 try:
-                    if de_upstream.tunnel(upstream, host, port) != 200:
+                    decision = b"X-Digital-Examen-Block: ai" if verdict == "ai_block" else b""
+                    if de_upstream.tunnel(upstream, host, port, decision) != 200:
                         raise OSError("локальный анализ отклонил домен")
                 except OSError:
                     upstream.close()
@@ -561,7 +560,7 @@ class Handler(socketserver.BaseRequestHandler):
                 upstream = connect_web(ip, port, proxy is not None)
         except OSError:
             return
-        if port == 80 and group == "":
+        if port == 80:
             try:
                 with upstream:
                     if inspect_http(client, upstream, data, host, port):

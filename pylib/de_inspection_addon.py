@@ -2,9 +2,10 @@ import json
 import re
 
 from mitmproxy import http
+from urllib.parse import parse_qs, urlsplit
 
+import de_common
 import de_inspection as inspection
-import de_patterns
 
 
 def approved(host, port):
@@ -12,22 +13,33 @@ def approved(host, port):
 
 
 def blocked():
-    return http.Response.make(403, "Запрос запрещён политикой школы".encode(), {
-        "Content-Type": "text/plain; charset=utf-8",
+    return http.Response.make(403, inspection.block_page(), {
+        "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store",
     })
 
 
-def active_rules(flow):
-    rules = inspection.groups.get()
-    if any(de_patterns.any_match(rule.get("always_allow"), flow.request.host) for rule in rules):
-        return []
-    return rules
+MANAGEMENT_HOST = urlsplit(de_common.setting("DE_API_URL", "https://ex.1580.ru")).hostname
+GROUP_CONFIG_PATH = re.compile(r"/api/computers/groups(?:/[0-9]+(?:/save)?)?/?$")
+
+
+def scans_content(request):
+    return not (request.host.lower().rstrip(".") == MANAGEMENT_HOST
+                and GROUP_CONFIG_PATH.fullmatch(urlsplit(request.path).path))
+
+
+AI_BLOCKED_CONNECTIONS = set()
+
+
+def client_disconnected(client):
+    AI_BLOCKED_CONNECTIONS.discard(client.id)
 
 
 def http_connect(flow):
     if not approved(flow.request.host, flow.request.port):
         flow.response = blocked()
+    elif flow.request.headers.get("X-Digital-Examen-Block") == "ai":
+        AI_BLOCKED_CONNECTIONS.add(flow.client_conn.id)
 
 
 def request_text(request):
@@ -40,8 +52,6 @@ def request_text(request):
 
 
 def is_text_message(message):
-    if message.headers.get("content-encoding", "identity").lower() not in ("", "identity"):
-        return False
     content_type = message.headers.get("content-type", "").lower()
     return content_type.startswith("text/") or any(
         kind in content_type for kind in ("json", "xml", "javascript", "x-www-form-urlencoded")
@@ -49,10 +59,18 @@ def is_text_message(message):
 
 
 def text_body(message):
-    return message.raw_content if is_text_message(message) else b""
+    return inspection.text_prefix(
+        message.raw_content, message.headers.get("content-encoding", "identity").lower()
+    ) if is_text_message(message) else b""
 
 
 def ai_request(request):
+    host = request.host.rstrip(".").lower()
+    if host in {"ya.ru", "www.ya.ru", "yandex.ru", "www.yandex.ru"}:
+        url = urlsplit(request.path)
+        if url.path.startswith("/alice/") or (url.path.rstrip("/") == "/search"
+                and set(parse_qs(url.query).get("mode", ())) & {"ai", "alice", "neuro"}):
+            return True
     if request.method != "POST" or "application/json" not in request.headers.get("content-type", "").lower():
         return False
     path = request.path.split("?", 1)[0]
@@ -95,24 +113,26 @@ def request(flow):
             or inspection.host_name(request.pretty_host) != inspection.host_name(request.host)):
         flow.response = blocked()
         return
-    rules = active_rules(flow)
+    rules = inspection.groups.get()
     if not rules:
         return
-    domain_blocked = any(
-        rule.get("principle") == "allow" or de_patterns.any_match(rule.get("denied"), request.host)
-        for rule in rules
-    )
-    if (domain_blocked or (any(rule.get("ai_auto") for rule in rules) and ai_request(request))
-            or inspection.matches_content([request_text(request)], rules)):
+    domain_blocked = (flow.client_conn.id in AI_BLOCKED_CONNECTIONS
+                      or inspection.url_blocked(request.host, request.pretty_url, rules))
+    if domain_blocked or (scans_content(request) and (
+            (any(rule.get("ai_auto") for rule in rules) and ai_request(request))
+            or inspection.matches_content([request_text(request)], rules))):
         flow.response = blocked()
 
 
 def responseheaders(flow):
+    if not scans_content(flow.request):
+        return
     before = flow.response
     scan_response(flow, body=False)
-    if flow.response is not before or not before.stream or not is_text_message(before):
+    if (flow.response is not before or not before.stream or not is_text_message(before)
+            or before.headers.get("content-encoding", "identity").lower() not in ("", "identity")):
         return
-    rules = active_rules(flow)
+    rules = inspection.groups.get()
     if not any(rule.get("request_deny") for rule in rules):
         return
     request = request_text(flow.request)
@@ -123,12 +143,12 @@ def responseheaders(flow):
 
 
 def response(flow):
-    if not flow.response.stream:
+    if scans_content(flow.request) and not flow.response.stream:
         scan_response(flow, body=True)
 
 
 def scan_response(flow, body):
-    rules = active_rules(flow)
+    rules = inspection.groups.get()
     if not rules:
         return
     reply = flow.response
@@ -143,7 +163,7 @@ def response_text(reply, body):
 
 
 def websocket_message(flow):
-    rules = active_rules(flow)
+    rules = inspection.groups.get()
     message = flow.websocket.messages[-1]
     if rules and message.is_text and inspection.matches_content([
         request_text(flow.request), message.content[:inspection.MAX_BODY],

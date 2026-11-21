@@ -1,6 +1,9 @@
 import json
 from pathlib import Path
-import re
+import zlib
+from urllib.parse import unquote_plus
+
+import de_patterns
 
 HOSTS_FILE = Path("/etc/digital-examen/inspect-hosts")
 POLICY_FILE = Path("/var/lib/digital-examen/policy.json")
@@ -55,9 +58,8 @@ groups = CachedFile(POLICY_FILE, load_groups, [])
 
 
 def matches_content(parts, rules):
-    combined = b"\r\n\r\n".join(parts).decode("utf-8", "surrogateescape").casefold()
-    if any(term.casefold() in combined for rule in rules for term in rule.get("request_allow", [])):
-        return False
+    raw = b"\r\n\r\n".join(parts).decode("utf-8", "surrogateescape")
+    combined = (raw + "\n" + unquote_plus(raw, errors="replace")).casefold()
     return any(term.casefold() in combined for rule in rules for term in rule.get("request_deny", []))
 
 
@@ -87,3 +89,52 @@ class StreamPrefix:
         if self.blocked:
             return b""
         return prefix + chunk[taken:]
+
+
+def block_page():
+    for page in (Path("/etc/digital-examen/block.html"),
+                 Path("/opt/digital-examen-computers/config/block.html"),
+                 Path(__file__).resolve().parents[1] / "config/block.html"):
+        try:
+            return page.read_bytes()
+        except OSError:
+            continue
+    return "<h1>Сайт закрыт ограничениями школы</h1>".encode()
+
+
+def url_matches(patterns, target):
+    def matches(pattern):
+        offset = 0
+        for part in pattern.split("*"):
+            offset = target.find(part, offset)
+            if offset < 0:
+                return False
+            offset += len(part)
+        return True
+
+    patterns = patterns or []
+    return (any(matches(pattern) for pattern in patterns if not pattern.startswith("!"))
+            and not any(matches(pattern[1:]) for pattern in patterns if pattern.startswith("!")))
+
+
+def url_blocked(host, target, rules):
+    if any(de_patterns.any_match(rule.get("always_allow"), host)
+           or url_matches(rule.get("url_allow"), target) for rule in rules):
+        return False
+    return any(rule.get("principle") == "allow"
+               or de_patterns.any_match(rule.get("denied"), host)
+               or url_matches(rule.get("url_denied"), target) for rule in rules)
+
+
+def text_prefix(data, encoding):
+    if not data:
+        return b""
+    if encoding in ("", "identity"):
+        return data[:MAX_BODY]
+    if encoding in ("gzip", "deflate"):
+        try:
+            bits = 31 if encoding == "gzip" else 15
+            return zlib.decompressobj(bits).decompress(data[:MAX_BODY], MAX_BODY)
+        except zlib.error:
+            return b""
+    return b""
