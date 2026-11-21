@@ -1,3 +1,96 @@
-<!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><title>Сайт закрыт ограничениями школы</title></head>
-<body style="display:grid;place-items:center;min-height:100vh;font-family:sans-serif;text-align:center"><h1>Сайт закрыт ограничениями школы</h1></body></html>
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Сайт закрыт ограничениями школы</title>
+    <style>
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            min-height: 100dvh;
+            display: grid;
+            place-items: center;
+            padding: 24px;
+            background: radial-gradient(ellipse at center, #f7f7fc, #edf0fb);
+            color: #191e33;
+            font-family: Arial, Helvetica, sans-serif;
+            text-align: center;
+        }
+
+        main { width: 100%; max-width: 1000px; }
+
+        .illustration {
+            display: block;
+            width: min(100%, 620px);
+            height: auto;
+            margin: 0 auto 24px;
+        }
+
+        h1 {
+            font-size: clamp(22px, 3.5vw, 40px);
+            line-height: 1.2;
+            letter-spacing: -0.025em;
+            margin: 0 0 20px;
+        }
+
+        p {
+            margin: 0;
+            font-size: clamp(16px, 2.2vw, 25px);
+            line-height: 1.5;
+            color: #686d91;
+        }
+    </style>
+</head>
+<body>
+    <main>
+        <svg class="illustration" viewBox="0 0 540 330"
+             xmlns="http://www.w3.org/2000/svg"
+             role="img" aria-label="403">
+            <defs>
+                <linearGradient id="cloud" x1="0" y1="0" x2="1" y2="0.75">
+                    <stop offset="0%" stop-color="#cddffb"/>
+                    <stop offset="50%" stop-color="#e7e1fa"/>
+                    <stop offset="100%" stop-color="#ffdef5"/>
+                </linearGradient>
+                <linearGradient id="blue" x1="0" y1="0" x2="0.2" y2="1">
+                    <stop stop-color="#104de0"/>
+                    <stop offset="100%" stop-color="#1245d5"/>
+                </linearGradient>
+            </defs>
+
+            <!-- Пастельное облако -->
+            <path fill="url(#cloud)" d="M86 73
+                C92 8 192 -12 244 43
+                Q259 58 270 61
+                C326 5 421 12 435 114
+                C514 109 545 192 497 240
+                Q473 265 448 255
+                C438 321 361 332 314 283
+                C244 338 175 335 120 282
+                Q109 273 94 284
+                C22 332 -19 245 46 203
+                C67 190 82 186 86 147
+                C14 157 13 82 86 73 Z"/>
+
+            <!-- Две небольшие звезды -->
+            <g fill="#ffba35">
+                <path d="M40 156 Q42 153 45 156 L48 165 Q49 167 52 168 L60 170 Q64 172 60 175 L52 177 Q49 178 48 181 L45 190 Q42 194 40 190 L37 181 Q36 178 33 177 L25 175 Q21 172 25 170 L33 168 Q36 167 37 165 Z" transform="translate(12 2) scale(.8)"/>
+                <path d="M440 45 Q443 39 446 45 L449 55 Q450 58 453 59 L464 62 Q469 65 464 68 L453 71 Q450 72 449 75 L446 85 Q443 91 440 85 L437 75 Q436 72 433 71 L422 68 Q417 65 422 62 L433 59 Q436 58 437 55 Z"/>
+            </g>
+
+            <!-- Цифры — векторные контуры, не зависят от шрифта -->
+            <g fill="url(#blue)" fill-rule="evenodd" transform="translate(1 2)">
+                <path d="M136 96 Q140 90 149 90 H170 Q184 90 184 105 V184 H191 Q202 184 202 195 V210 Q202 222 190 222 H184 V244 Q184 256 172 256 H151 Q138 256 138 244 V222 H79 Q67 222 67 210 V190 Q67 184 72 177 Z M138 132 L103 184 H138 Z"/>
+                <path d="M270 87 C310 87 338 122 338 173 C338 224 310 259 270 259 C229 259 203 224 203 173 C203 122 229 87 270 87 Z M270 124 C255 124 245 143 245 173 C245 203 255 222 270 222 C285 222 296 203 296 173 C296 143 285 124 270 124 Z"/>
+                <path d="M350 132 C342 128 342 119 346 111 C357 94 379 87 401 87 C436 87 460 106 460 133 C460 151 450 164 435 170 C455 178 467 193 467 212 C467 241 439 259 402 259 C374 259 350 247 340 228 C336 220 338 210 349 207 H365 Q376 205 382 215 Q389 224 403 224 C417 224 426 215 426 205 C426 192 416 186 402 186 H398 Q385 186 385 174 V166 Q385 154 398 154 H401 C414 154 420 146 420 137 C420 127 412 121 400 121 Q386 121 379 132 Q375 140 364 139 Z"/>
+            </g>
+        </svg>
+
+        <h1>Сайт закрыт ограничениями школы</h1>
+        <p>Самое время заняться выполнением комплектов</p>
+    </main>
+</body>
+</html>
