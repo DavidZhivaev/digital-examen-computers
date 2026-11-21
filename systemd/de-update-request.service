@@ -1,0 +1,10 @@
+[Unit]
+Description=Start the Digital Examen updater on local request
+
+[Service]
+Type=oneshot
+StandardInput=socket
+ExecStart=/usr/bin/python3.8 -c 'import socket; socket.socket(fileno=0).recv(1)'
+ExecStart=/usr/bin/systemctl start de-update.service
+ExecStopPost=/bin/sleep 10
+TimeoutStartSec=21min

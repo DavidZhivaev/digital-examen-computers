@@ -80,7 +80,7 @@ if [ -e "$state/users" ] || [ -e "$image" ]; then
     fi
 fi
 
-for unit in de-health.timer de-health.service de-vault-sync.timer de-rotate.timer de-cleanup.service de-keywatch.service \
+for unit in de-update-request.socket de-update-request.service de-health.timer de-health.service de-vault-sync.timer de-rotate.timer de-cleanup.service de-keywatch.service \
     de-vault-sync.service de-rotate.service de-netns.service de-agent.service de-screen.service \
     de-inspect-ca.timer de-inspect-ca.service de-traffic.service de-inspect.service de-net.service de-update.timer de-update.service de-secure.service; do
     if [ -f "/etc/systemd/system/$unit" ]; then
@@ -222,7 +222,7 @@ if [ "$remove" = --remove ]; then
     if [ -f "$state/installed-files" ]; then
         while IFS= read -r path; do
             case "$path" in
-                /etc/systemd/system/de-*.service|/etc/systemd/system/de-*.timer)
+                /etc/systemd/system/de-*.service|/etc/systemd/system/de-*.timer|/etc/systemd/system/de-*.socket)
                     [ -f "$path" ] || continue
                     systemctl disable --now "${path##*/}"
                     unlink "$path"

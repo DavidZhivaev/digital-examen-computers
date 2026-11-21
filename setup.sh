@@ -89,7 +89,7 @@ if [ -f "$state/installed-files" ]; then
     while IFS= read -r path; do
         grep -qxF -- "$path" "$manifest" && continue
         case "$path" in
-            /etc/systemd/system/de-*.service|/etc/systemd/system/de-*.timer)
+            /etc/systemd/system/de-*.service|/etc/systemd/system/de-*.timer|/etc/systemd/system/de-*.socket)
                 [ -e "$path" ] || continue
                 systemctl disable --now "${path##*/}"
                 unlink "$path"
@@ -113,7 +113,7 @@ for unit in $enabled; do
         de-update.timer)
             if [ "${1:-}" = --update ]; then systemctl restart "$unit"; fi
             ;;
-        *.timer) systemctl start "$unit" ;;
+        *.timer|*.socket) systemctl start "$unit" ;;
     esac
 done
 mv -f "$manifest" "$state/installed-files"

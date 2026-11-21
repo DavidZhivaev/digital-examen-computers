@@ -1,0 +1,10 @@
+[Unit]
+Description=Digital Examen local update requests
+
+[Socket]
+ListenDatagram=/run/de-update-request.sock
+SocketMode=0666
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target
