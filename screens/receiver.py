@@ -425,12 +425,11 @@ class Handler(BaseHTTPRequestHandler):
             offset += size
 
         note_seen(header.get("computer", ""))
-        watch_space()
-
         try:
             if header.get("kind") == "live":
                 store_live(header, blobs[0] if blobs else b"")
             else:
+                watch_space()
                 store_frame(header, blobs)
         except (OSError, IndexError, KeyError) as error:
             self.reply(500, {"error": str(error)})
@@ -491,18 +490,18 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parts[0] == "watch":
-            interval = max(1, int(query.get("interval", ["2"])[0]))
+            interval = 1 if query.get("interval", ["2"])[0] == "1" else 2
             names = [safe_name(item) for item in query.get("computer", [])]
-            now = time.time()
+            now = time.monotonic()
             with LOCK:
-                for name in names:
-                    if name:
-                        previous = WATCHED.get(name)
-                        WATCHED[name] = (now, interval)
-                        if not previous or now - previous[0] > 6 or previous[1] != interval:
-                            queue = QUEUES.setdefault(name, [])
-                            queue[:] = [command for command in queue if command.get("name") != "live"]
-                            queue.append({"name": "live", "interval": interval})
+                for name in filter(None, names):
+                    previous = active_watch(name, now)
+                    WATCHED.setdefault(name, {})[interval] = now + 12
+                    current = active_watch(name, now)
+                    if previous != current:
+                        queue = QUEUES.setdefault(name, [])
+                        queue[:] = [command for command in queue if command.get("name") != "live"]
+                        queue.append({"name": "live", "interval": current})
             self.reply(200, {"ok": True, "watched": names, "interval": interval})
             return
 
@@ -557,7 +556,7 @@ class Handler(BaseHTTPRequestHandler):
                         if command.get("name") == "policy":
                             command["policy"] = POLICY.get(computer, {})
             if queue:
-                self.reply(200, {"commands": queue})
+                self.reply(200, {"commands": queue, "interval": watched_interval(computer)})
                 return
             time.sleep(0.2)
 
@@ -616,17 +615,20 @@ def find_record(computer, record_id, query):
     return None
 
 
+def active_watch(name, now):
+    current = WATCHED.get(name, {})
+    for interval, expires in list(current.items()):
+        if expires <= now:
+            current.pop(interval)
+    if current:
+        return min(current)
+    WATCHED.pop(name, None)
+    return 0
+
+
 def watched_interval(computer):
-    name = safe_name(computer)
     with LOCK:
-        seen = WATCHED.get(name)
-        if not seen:
-            return 0
-        stamp, interval = seen
-        if time.time() - stamp > 6:
-            WATCHED.pop(name, None)
-            return 0
-        return interval
+        return active_watch(safe_name(computer), time.monotonic())
 
 
 os.makedirs(DATA_DIR, exist_ok=True)
