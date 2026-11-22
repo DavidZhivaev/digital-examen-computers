@@ -78,11 +78,15 @@ def computer(name):
 def main():
     parser = argparse.ArgumentParser(prog="de")
     commands = parser.add_subparsers(dest="action", required=True)
+    commands.add_parser("help", help="Показать справку")
     commands.add_parser("list")
     commands.add_parser("status")
     commands.add_parser("update")
     commands.add_parser("ssh").add_argument("computer")
     args = parser.parse_args()
+    if args.action == "help":
+        parser.print_help()
+        return
     if args.action == "update":
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as request_socket:
             request_socket.settimeout(1)

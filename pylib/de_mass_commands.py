@@ -4,7 +4,6 @@ import tempfile
 
 import de_common
 
-COMMANDS = {"reboot", "git pull", "scp"}
 SCP_CONFIG = "/etc/digital-examen/mass-scp.conf"
 
 
@@ -30,8 +29,9 @@ def copy_package():
 
 
 def execute(command, target_id):
-    if command not in COMMANDS:
-        return 126, "Команда не разрешена для массового выполнения"
+    command = command.strip()
+    if not command or len(command) > 4000:
+        return 2, "Пустая или слишком длинная команда"
     if command == "scp":
         return copy_package()
     if command == "git pull":
@@ -40,6 +40,8 @@ def execute(command, target_id):
             "--property=RuntimeMaxSec=18min", "/usr/local/sbin/de-update", "--report", str(target_id),
         ])
         return (code, output) if code else (None, "")
+    if command != "reboot":
+        return de_common.run(["/bin/sh", "-c", command], 18 * 60)
     code, output = de_common.run([
         "systemd-run", "--on-active=20s", "--collect", "systemctl", "reboot",
     ])

@@ -12,7 +12,6 @@ from urllib.parse import parse_qs, parse_qsl, unquote_plus, urlencode, urlsplit
 
 import de_patterns
 
-HOSTS_FILE = Path("/etc/digital-examen/inspect-hosts")
 POLICY_FILE = Path("/var/lib/digital-examen/policy.json")
 LISTEN_PORT = 3130
 ORIGIN_PORT = 3140
@@ -45,24 +44,10 @@ class CachedFile:
         return self.value
 
 
-class HostSet(frozenset):
-    def __contains__(self, host):
-        return super().__contains__("*") or super().__contains__(host)
-
-
-def load_hosts(text):
-    return HostSet(
-        host_name(line.strip())
-        for line in text.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    )
-
-
 def load_groups(text):
     return json.loads(text).get("groups", [])
 
 
-hosts = CachedFile(HOSTS_FILE, load_hosts, frozenset())
 groups = CachedFile(POLICY_FILE, load_groups, [])
 
 

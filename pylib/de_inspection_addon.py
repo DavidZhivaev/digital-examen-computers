@@ -2,7 +2,6 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
 import re
-import time
 
 from mitmproxy import http
 from urllib.parse import parse_qs, urljoin, urlsplit
@@ -10,10 +9,6 @@ from urllib.parse import parse_qs, urljoin, urlsplit
 import de_common
 import de_learned
 import de_inspection as inspection
-
-
-def approved(host, port):
-    return port == 443 and inspection.host_name(host) in inspection.hosts.get()
 
 
 def blocked():
@@ -52,7 +47,7 @@ def client_disconnected(client):
 
 
 def http_connect(flow):
-    if not approved(flow.request.host, flow.request.port):
+    if flow.request.port != 443:
         flow.response = blocked()
     elif flow.request.headers.get("X-Digital-Examen-Block") == "ai":
         AI_BLOCKED_CONNECTIONS.add(flow.client_conn.id)
@@ -139,7 +134,7 @@ def ai_request(request):
 
 def request(flow):
     request = flow.request
-    if (not approved(request.host, request.port) or request.scheme != "https"
+    if (request.port != 443 or request.scheme != "https"
             or inspection.host_name(request.pretty_host) != inspection.host_name(request.host)):
         flow.response = blocked()
         return
@@ -153,6 +148,12 @@ def request(flow):
     if domain_blocked or cached_ai_block:
         flow.response = blocked()
         return
+    host = inspection.host_name(request.host)
+    if (host in inspection.YANDEX_SEARCH_HOSTS or inspection.google_search_host(host)):
+        query = urlsplit(request.path).query
+        if query and inspection.matches_content([query.encode()], rules):
+            flow.response = blocked()
+            return
     if not scans_content(request, rules):
         return
     if request.method == "GET" and de_learned.blocked(de_learned.endpoint(request.pretty_url), inspection.content_terms(rules)):
@@ -202,30 +203,11 @@ def responseheaders(flow):
     if inspection.matches_content([response_text(before, b"")], rules):
         block_response_headers(flow)
         return
-    limit = scan_limit(before)
-    if not limit:
+    if (flow.request.method == "HEAD" or before.status_code < 200
+            or before.status_code in (204, 304) or not scan_limit(before)):
         before.stream = True
         return
-    if (flow.request.method != "HEAD" and before.status_code >= 200 and before.status_code not in (204, 304)
-            and (before.stream or "content-length" not in before.headers)):
-        header = response_text(before, b"")
-        encoding = before.headers.get("content-encoding", "identity").lower()
-        prefix_limit = 3 * 65536 if limit == inspection.MAX_BODY and encoding in ("", "identity") else limit
-        url = de_learned.endpoint(flow.request.pretty_url) if flow.request.method == "GET" else ""
-        terms = inspection.content_terms(rules)
-
-        def scan(prefix):
-            return inspection.matching_terms([header + inspection.text_prefix(prefix, encoding, prefix_limit)], terms)
-
-        def defer(prefix):
-            enqueue_scan(url, scan, prefix)
-
-        prefix_filter = inspection.StreamPrefix(prefix_limit, scan, defer, time.monotonic() + SCAN_TIMEOUT)
-        before.headers.pop("content-length", None)
-        if flow.client_conn.alpn != b"h2":
-            before.headers["transfer-encoding"] = "chunked"
-        before.stream = inspection.stream_chunks(prefix_filter)
-        stream_yandex_style(flow, prefix_filter)
+    before.stream = False
 
 
 def yandex_html(flow):

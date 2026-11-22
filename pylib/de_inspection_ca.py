@@ -129,8 +129,7 @@ def sync(repair=False):
         subprocess.run(["update-ca-trust", "extract"], check=True)
     inspection_ca(str(ANCHOR), True)
     chromium_ca(True)
-    if not HOSTS.exists() or HOSTS.read_text() != "*\n":
-        write_file(HOSTS, "*\n")
+    HOSTS.unlink(missing_ok=True)
 
 
 def wait_ready():

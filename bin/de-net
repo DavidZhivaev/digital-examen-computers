@@ -548,8 +548,16 @@ class Handler(socketserver.BaseRequestHandler):
         except ValueError:
             return
 
+        if not secure and not tunnel and port == 80 and de_inspection.host_name(host) in {"ya.ru", "www.ya.ru"}:
+            try:
+                client.sendall(b"HTTP/1.1 302 Found\r\nLocation: https://yandex.ru/\r\n"
+                               b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
+            return
+
         verdict, group = decide(host)
-        inspect_tls = port == 443 and de_inspection.host_name(host) in de_inspection.hosts.get()
+        inspect_tls = port == 443
         if verdict != "pass" and not inspect_tls and (
                 verdict == "ai_block" or port != 80 or group not in {rule.get("name") for rule in de_inspection.groups.get()
                                             if rule.get("url_allow")}):
