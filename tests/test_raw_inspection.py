@@ -7,6 +7,7 @@ import base64
 import gzip
 import socket
 import sys
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -29,6 +30,35 @@ with patch("builtins.open", side_effect=open_test_config):
 
 
 class RawInspectionTests(unittest.TestCase):
+    def test_late_stream_releases_bytes_and_checks_the_same_prefix(self):
+        from de_inspection import StreamPrefix
+
+        deferred = Mock()
+        prefix = StreamPrefix(8, Mock(), deferred, deadline=10)
+        with patch("de_inspection.time.monotonic", side_effect=[9.9, 10.1, 10.2]):
+            self.assertEqual(prefix(b"abc"), b"")
+            self.assertEqual(prefix(b"def"), b"abcdef")
+            self.assertEqual(prefix(b"ghijk"), b"ghijk")
+        deferred.assert_called_once_with(b"abcdefgh")
+        self.assertEqual(prefix(b"tail"), b"tail")
+
+    def test_learned_endpoints_follow_active_terms_and_expire(self):
+        import de_learned
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "local.json"
+            cache = de_inspection.CachedFile(path, de_learned.json.loads, {})
+            url = de_learned.endpoint("https://example.org/answer?private=value")
+            with patch.multiple(de_learned, LOCAL=path, local=cache), patch("de_learned.time.time") as now:
+                now.return_value = 100
+                de_learned.remember(url, ("test",))
+                self.assertEqual(url, "https://example.org/answer")
+                self.assertTrue(de_learned.blocked(url, ("test",)))
+                self.assertFalse(de_learned.blocked(url, ("different",)))
+                now.return_value = 86501
+                self.assertFalse(de_learned.blocked(url, ("test",)))
+        self.assertEqual(de_learned.endpoint("https://yandex.ru/search/?text=test"), "")
+
     def test_origin_transport_accepts_only_the_inspector_side(self):
         handler = relay.InspectionOrigin.__new__(relay.InspectionOrigin)
         handler.client_address = ("127.0.0.1", 39000)

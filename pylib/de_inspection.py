@@ -7,6 +7,7 @@ import zlib
 import html
 from html.parser import HTMLParser
 import re
+import time
 from urllib.parse import parse_qs, parse_qsl, unquote_plus, urlencode, urlsplit
 
 import de_patterns
@@ -84,6 +85,19 @@ def matches_content(parts, rules):
     return any(term in decoded or term in normalized for term in terms)
 
 
+def matching_terms(parts, terms):
+    if not terms:
+        return ()
+    raw = b"\r\n\r\n".join(parts).decode("utf-8", "surrogateescape")
+    folded = raw.casefold()
+    decoded = html.unescape(unquote_plus(raw, errors="replace"))
+    decoded = re.sub(r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match[1], 16)), decoded)
+    visible = re.sub(r"</?[A-Za-z][^<>]{0,512}>", " ", decoded)
+    normalized = " ".join(visible.casefold().split())
+    decoded = decoded.casefold()
+    return tuple(term for term in terms if term in folded or term in decoded or term in normalized)
+
+
 def message_text(first_line, headers, body):
     fields = b"\r\n".join(key + b": " + value for key, value in headers)
     return first_line + b"\r\n" + fields + b"\r\n\r\n" + (body or b"")[:MAX_BODY]
@@ -91,7 +105,10 @@ def message_text(first_line, headers, body):
 
 
 class StreamPrefix:
-    def __init__(self, limit, denied):
+    def __init__(self, limit, denied, defer=None, deadline=None):
+        self.defer = defer
+        self.deadline = deadline
+        self.released = False
         self.limit = limit
         self.denied = denied
         self.pending = bytearray()
@@ -100,16 +117,25 @@ class StreamPrefix:
     def __call__(self, chunk):
         if self.blocked is not None:
             return b"" if self.blocked else chunk
-        taken = min(self.limit - len(self.pending), len(chunk))
+        previous = len(self.pending)
+        taken = min(self.limit - previous, len(chunk))
         self.pending.extend(chunk[:taken])
-        if chunk and len(self.pending) < self.limit:
+        complete = not chunk or len(self.pending) == self.limit
+        late = self.deadline is not None and time.monotonic() >= self.deadline
+        if not complete and not late:
             return b""
         prefix = bytes(self.pending)
-        self.pending.clear()
-        self.blocked = self.denied(prefix)
-        if self.blocked:
-            return b""
-        return prefix + chunk[taken:]
+        output = chunk if self.released else prefix[:previous] + chunk
+        if late:
+            self.released = True
+        if complete:
+            self.pending.clear()
+            if self.released:
+                self.defer(prefix)
+                self.blocked = False
+            else:
+                self.blocked = self.denied(prefix)
+        return b"" if self.blocked else output
 
 
 def stream_chunks(transform):

@@ -1,7 +1,5 @@
 import asyncio
-from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from hashlib import sha256
 import json
 import re
 import time
@@ -10,6 +8,7 @@ from mitmproxy import http
 from urllib.parse import parse_qs, urljoin, urlsplit
 
 import de_common
+import de_learned
 import de_inspection as inspection
 
 
@@ -45,7 +44,6 @@ AI_BLOCKED_CONNECTIONS = set()
 SCAN_TIMEOUT = 0.3
 SCAN_WORKERS = ThreadPoolExecutor(max_workers=2)
 SCAN_PENDING = set()
-DEFERRED_BLOCKS = OrderedDict()
 
 
 def client_disconnected(client):
@@ -156,8 +154,7 @@ def request(flow):
         return
     if not scans_content(request, rules):
         return
-    cached = DEFERRED_BLOCKS.get(scan_key(request))
-    if cached and cached[0] > time.monotonic() and cached[1] == inspection.content_terms(rules):
+    if request.method == "GET" and de_learned.blocked(de_learned.endpoint(request.pretty_url), inspection.content_terms(rules)):
         flow.response = blocked()
         return
     if ai_enabled and ai_request(request):
@@ -213,9 +210,16 @@ def responseheaders(flow):
         header = response_text(before, b"")
         encoding = before.headers.get("content-encoding", "identity").lower()
         prefix_limit = 3 * 65536 if limit == inspection.MAX_BODY and encoding in ("", "identity") else limit
-        prefix_filter = inspection.StreamPrefix(prefix_limit, lambda prefix: inspection.matches_content(
-            [header + inspection.text_prefix(prefix, encoding, prefix_limit)], rules,
-        ))
+        url = de_learned.endpoint(flow.request.pretty_url) if flow.request.method == "GET" else ""
+        terms = inspection.content_terms(rules)
+
+        def scan(prefix):
+            return inspection.matching_terms([header + inspection.text_prefix(prefix, encoding, prefix_limit)], terms)
+
+        def defer(prefix):
+            enqueue_scan(url, scan, prefix)
+
+        prefix_filter = inspection.StreamPrefix(prefix_limit, scan, defer, time.monotonic() + SCAN_TIMEOUT)
         before.headers.pop("content-length", None)
         if flow.client_conn.alpn != b"h2":
             before.headers["transfer-encoding"] = "chunked"
@@ -270,36 +274,34 @@ async def response(flow):
                 before.raw_content = inspection.insert_yandex_style(before.raw_content)
 
 
-def scan_key(request):
-    return sha256(f"{request.method} {request.pretty_url}".encode()).digest()
+def enqueue_scan(url, scan, *args):
+    if len(SCAN_PENDING) >= 8:
+        return None
+    future = asyncio.get_running_loop().run_in_executor(SCAN_WORKERS, scan, *args)
+    SCAN_PENDING.add(future)
+
+    def remember(result):
+        SCAN_PENDING.discard(result)
+        if not result.cancelled() and result.exception() is None and result.result():
+            try:
+                de_learned.remember(url, result.result())
+            except OSError:
+                pass
+
+    future.add_done_callback(remember)
+    return future
 
 
 async def scan_buffered_response(flow, rules):
-    if len(SCAN_PENDING) >= 8:
+    raw = response_text(flow.response, text_body(flow.response))
+    url = de_learned.endpoint(flow.request.pretty_url) if flow.request.method == "GET" else ""
+    future = enqueue_scan(url, inspection.matching_terms, [raw], inspection.content_terms(rules))
+    if future is None:
         flow.response = http.Response.make(503, b"Content inspection busy", {"Cache-Control": "no-store"})
         return
-
-    raw = response_text(flow.response, text_body(flow.response))
-    future = asyncio.get_running_loop().run_in_executor(SCAN_WORKERS, inspection.matches_content, [raw], rules)
-    SCAN_PENDING.add(future)
-    future.add_done_callback(SCAN_PENDING.discard)
     done, _ = await asyncio.wait([future], timeout=SCAN_TIMEOUT)
-    if done:
-        if future.result():
-            flow.response = blocked()
-        return
-
-    key = scan_key(flow.request)
-    terms = inspection.content_terms(rules)
-
-    def remember(result):
-        if not result.cancelled() and result.exception() is None and result.result():
-            DEFERRED_BLOCKS[key] = (time.monotonic() + 86400, terms)
-            DEFERRED_BLOCKS.move_to_end(key)
-            if len(DEFERRED_BLOCKS) > 2048:
-                DEFERRED_BLOCKS.popitem(last=False)
-
-    future.add_done_callback(remember)
+    if done and future.result():
+        flow.response = blocked()
 
 
 def response_text(reply, body):

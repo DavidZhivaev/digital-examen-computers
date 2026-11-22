@@ -15,6 +15,7 @@ import urllib.request
 sys.path.insert(0, "/usr/local/lib/digital-examen")
 
 import de_common
+import de_learned
 import de_mass_commands
 import de_tabs
 
@@ -342,6 +343,20 @@ def command_jobs_loop():
 
 
 
+def learned_loop():
+    endpoint = API.rstrip("/") + "/api/computers/device/learned-blocks"
+    while True:
+        try:
+            records = [(url, term, expires - 86400) for url, terms in de_learned.active().items()
+                       for term, expires in terms.items()]
+            answer = de_common.send_json(endpoint, {"observations": records[-256:]}, "proxy", 15)
+            if isinstance(answer.get("blocks"), dict):
+                de_learned.write(de_learned.SHARED, answer["blocks"])
+        except (OSError, ValueError):
+            pass
+        time.sleep(1800)
+
+
 def main():
     if not URL or not COMPUTER:
         log("компьютер не на учёте, агент ждёт")
@@ -353,6 +368,7 @@ def main():
     threading.Thread(target=stats_loop, daemon=True).start()
     if API:
         threading.Thread(target=heartbeat_loop, daemon=True).start()
+        threading.Thread(target=learned_loop, daemon=True).start()
         threading.Thread(target=command_jobs_loop, daemon=True).start()
 
     while True:
