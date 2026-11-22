@@ -57,7 +57,8 @@ GROUP_CONFIG_PATH = re.compile(r"/api/computers/groups(?:/[0-9]+(?:/save)?)?/?$"
 
 
 def scans_content(request, rules):
-    return not (inspection.url_allowed(request.host, request.pretty_url, rules)
+    return not ((inspection.RUN / "block-off").exists()
+                or inspection.url_allowed(request.host, request.pretty_url, rules)
                 or (inspection.host_name(request.host) == MANAGEMENT_HOST
                     and GROUP_CONFIG_PATH.fullmatch(urlsplit(request.path).path)))
 
@@ -165,7 +166,7 @@ def request(flow):
         flow.response = blocked()
         return
     rules = inspection.groups.get()
-    if not rules or inspection.host_allowed(request.host, rules):
+    if not rules or (inspection.RUN / "block-off").exists() or inspection.host_allowed(request.host, rules):
         return
     domain_blocked = inspection.url_denial(request.host, request.pretty_url, rules)
     ai_enabled = any(rule.get("ai_auto") for rule in rules)
