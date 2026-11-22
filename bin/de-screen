@@ -145,6 +145,8 @@ def grab_wayland(login, session_id):
             if stat.S_ISDIR(details.st_mode) and details.st_uid == entry.pw_uid:
                 env["XDG_CONFIG_HOME"] = os.path.join(state, "config")
                 env["XDG_CACHE_HOME"] = os.path.join(state, "cache")
+                if WAYLAND_ENV.get("full_data") != key:
+                    env["XDG_DATA_HOME"] = env["XDG_DATA_DIRS"] = os.path.join(state, "data")
         except OSError:
             pass
         WAYLAND_ENV.update(key=key, expires=now + 15, env=env)
@@ -174,6 +176,10 @@ def grab_wayland(login, session_id):
                     return picture
     except (OSError, ValueError):
         pass
+    if "XDG_DATA_DIRS" in WAYLAND_ENV["env"]:
+        WAYLAND_ENV["full_data"] = key
+        WAYLAND_ENV["env"].pop("XDG_DATA_DIRS")
+        WAYLAND_ENV["env"].pop("XDG_DATA_HOME")
     return None
 
 
