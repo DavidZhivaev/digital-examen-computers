@@ -35,6 +35,11 @@ class LessonActivityTest(unittest.TestCase):
             self.assertEqual(activity.snapshot(start + 123)[0], {
                 "start": start, "seconds": 41, "requests": 7, "privileged": False,
             })
+            with patch.object(activity.time, "time", return_value=start + 124):
+                activity.mark_privileged()
+            self.assertTrue(activity.snapshot(start + 183)[0]["privileged"])
             activity.configure(start + 2700)
-            self.assertEqual(activity.snapshot(start + 2703)[0]["seconds"], 0)
+            self.assertEqual(activity.snapshot(start + 2703)[0], {
+                "start": start + 2700, "seconds": 0, "requests": 0, "privileged": False,
+            })
             activity.configure(None)

@@ -17,6 +17,7 @@ LOCK = threading.Lock()
 start = None
 covered = requests = 0
 privileged = False
+privileged_at = 0
 sent = None
 active = False
 
@@ -28,29 +29,37 @@ def configure(lesson):
             return
         start = lesson
         covered = requests = 0
-        privileged = False
+        privileged = start is not None and start <= privileged_at < start + DURATION
         sent = None
         if start is None:
             return
         try:
             saved = json.loads(STATE.read_text())
             if saved["start"] == start:
-                covered, requests, privileged = int(saved["covered"], 16), saved["requests"], saved["privileged"]
+                covered, requests = int(saved["covered"], 16), saved["requests"]
+                privileged |= saved["privileged"]
         except (OSError, ValueError, KeyError, TypeError):
             pass
 
 
-def record(stamp=None, count=0, admin=False):
-    global covered, requests, privileged
+def mark_privileged():
+    global privileged, privileged_at
+    with LOCK:
+        privileged_at = int(time.time())
+        if start is not None and start <= privileged_at < start + DURATION:
+            privileged = True
+
+
+def record(stamp, count=0):
+    global covered, requests
     with LOCK:
         if start is None:
             return
-        offset = int(stamp if stamp is not None else time.time()) - start
+        offset = int(stamp) - start
         if not 0 <= offset < DURATION:
             return
         requests = min(2**31 - 1, requests + count)
-        privileged |= admin
-        if stamp is not None and not count and active:
+        if not count and active:
             length = min(30, DURATION - offset)
             covered |= ((1 << length) - 1) << offset
 

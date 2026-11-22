@@ -184,6 +184,7 @@ def stats_loop():
     previous_cpu = cpu_sample()
     previous_net = network_bytes()
     previous_time = time.time()
+    previous_identity = None
 
     while True:
         time.sleep(STATS_INTERVAL)
@@ -228,8 +229,9 @@ def stats_loop():
             rules, url_groups, groups = [], [], []
         admin = login and de_common.is_admin(login)
         de_lesson_activity.active = bool(identity and session.get("LockedHint") != "yes")
-        if admin:
-            de_lesson_activity.record(admin=True)
+        if admin and identity and identity != previous_identity:
+            de_lesson_activity.mark_privileged()
+        previous_identity = identity
         de_tabs.activate(identity, None if admin else rules, [] if admin else url_groups, bool(groups) and not admin)
 
         uptime = first_number("/proc/uptime")

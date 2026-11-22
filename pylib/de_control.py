@@ -39,7 +39,7 @@ class Control(socketserver.StreamRequestHandler):
                 with urlopen(request, timeout=5) as answer:
                     if json.load(answer).get("name") != de_common.computer():
                         raise ValueError("Сайт не подтвердил этот компьютер")
-                de_lesson_activity.record(admin=True)
+                de_lesson_activity.mark_privileged()
                 result = {"ok": True}
                 if action != "lesson-login":
                     flag = RUN / (action + "-off")
