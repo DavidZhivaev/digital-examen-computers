@@ -152,7 +152,7 @@ def request(flow):
         flow.response = blocked()
         return
     rules = inspection.groups.get()
-    if not rules:
+    if not rules or inspection.host_allowed(request.host, rules):
         return
     domain_blocked = inspection.url_blocked(request.host, request.pretty_url, rules)
     ai_enabled = any(rule.get("ai_auto") for rule in rules)
@@ -182,7 +182,12 @@ def request(flow):
             return
         if request.headers.get("sec-fetch-dest", "") not in (
                 "style", "font", "image", "audio", "video", "script", "track"):
-            request.anticomp()
+            encodings = {entry.strip().lower() for entry in request.headers.get("accept-encoding", "").split(",")}
+            supported = [codec for codec in ("gzip", "deflate") if codec in encodings]
+            if supported:
+                request.headers["accept-encoding"] = ", ".join(supported)
+            else:
+                request.anticomp()
     if ai_enabled and request.method == "GET":
         if inspection.yandex_search(request.host, request.path):
             flow.metadata["de_yandex_search"] = True
@@ -321,10 +326,10 @@ async def scan_buffered_response(flow, rules):
     url = de_learned.endpoint(flow.request.pretty_url) if flow.request.method == "GET" else ""
     future = enqueue_scan(url, inspection.matching_terms, [raw], inspection.content_terms(rules))
     if future is None:
-        flow.response = http.Response.make(503, b"Content inspection busy", {"Cache-Control": "no-store"})
+        flow.response = blocked()
         return
     done, _ = await asyncio.wait([future], timeout=SCAN_TIMEOUT)
-    if done and future.result():
+    if not done or future.result():
         flow.response = blocked()
 
 

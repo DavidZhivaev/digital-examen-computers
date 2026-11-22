@@ -52,6 +52,17 @@ class RawInspectionTests(unittest.TestCase):
         for host in ("a.example", "b.example", "c.example"):
             self.assertTrue(de_inspection.url_blocked(host, "https://" + host, rules))
 
+    def test_never_block_domains_apply_at_every_priority(self):
+        rules = de_inspection.load_groups(json.dumps({"groups": [
+            {"priority": 1, "principle": "allow", "denied": ["*.1580.ru", "silvertests.ru"]},
+            {"priority": 50, "always_allow": ["*.1580.ru", "silvertests.ru"]},
+        ]}))
+        for host in ("sdo.1580.ru", "silvertests.ru"):
+            self.assertTrue(de_inspection.host_allowed(host, rules))
+            self.assertFalse(de_inspection.url_blocked(host, "https://" + host, rules))
+            with patch.object(de_inspection.groups, "get", return_value=rules):
+                self.assertEqual(relay.decide(host)[0], "pass")
+
     def test_inspector_sends_block_page_for_chunked_content_and_topics(self):
         try:
             from mitmproxy import http

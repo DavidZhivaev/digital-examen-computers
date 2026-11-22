@@ -230,9 +230,8 @@ def ask_ai(host):
 
 def decide(host):
     groups = de_inspection.groups.get()
-    for group in groups:
-        if de_patterns.any_match(group.get("always_allow"), host):
-            return "pass", group.get("name") or "Всегда разрешено"
+    if de_inspection.host_allowed(host, groups):
+        return "pass", "Всегда разрешено"
     for group in groups:
         name = group.get("name", "")
         if group.get("ai_auto") and de_patterns.any_match(AI_HOSTS, host):

@@ -43,12 +43,18 @@ class CachedFile:
         return self.value
 
 
+class PolicyGroups(list):
+    def __init__(self, active, all_groups):
+        super().__init__(active)
+        self.host_exceptions = tuple(rule.get("always_allow") for rule in all_groups)
+
+
 def load_groups(text):
     ordered = sorted(json.loads(text).get("groups", []), key=lambda rule: rule.get("priority", 50))
     for index, rule in enumerate(ordered):
         if rule.get("principle") == "allow":
-            return ordered[:index + 1]
-    return ordered
+            return PolicyGroups(ordered[:index + 1], ordered)
+    return PolicyGroups(ordered, ordered)
 
 
 groups = CachedFile(POLICY_FILE, load_groups, [])
@@ -169,14 +175,22 @@ def search_return_url(host, target):
     return ""
 
 
+def host_allowed(host, rules):
+    exceptions = getattr(rules, "host_exceptions", None)
+    if exceptions is None:
+        exceptions = (rule.get("always_allow") for rule in rules)
+    return any(de_patterns.any_match(patterns, host) for patterns in exceptions)
+
+
 def url_allowed(host, target, rules):
-    return any(de_patterns.any_match(rule.get("always_allow"), host)
-               or url_matches(rule.get("url_allow"), target) for rule in rules)
+    return host_allowed(host, rules) or any(url_matches(rule.get("url_allow"), target) for rule in rules)
 
 
 def url_blocked(host, target, rules):
+    if host_allowed(host, rules):
+        return False
     for rule in rules:
-        if url_allowed(host, target, (rule,)):
+        if url_matches(rule.get("url_allow"), target):
             continue
         if de_patterns.any_match(rule.get("denied"), host) or url_matches(rule.get("url_denied"), target):
             return True
