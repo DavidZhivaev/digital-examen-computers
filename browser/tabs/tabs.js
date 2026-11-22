@@ -89,6 +89,12 @@ function checkRequest({ url }) {
   if (blockedUrl(url)) return { cancel: true }
 }
 
+let lessonRequests = {}
+api.webRequest.onBeforeRequest.addListener(() => {
+  const minute = Math.floor(Date.now() / 60000) * 60
+  lessonRequests[minute] = (lessonRequests[minute] || 0) + 1
+}, { urls: ['*://*.1580.ru/*', '*://*.silvertests.ru/*'] })
+
 function requestFilter(pattern) {
   const hint = pattern.match(/(?:[A-Za-z0-9]\/|\/(?=[A-Za-z0-9._~-]+\?))([A-Za-z0-9._~/?&=+-]+)/)
   return hint ? `*://*/*${hint[1]}*` : '*://*/*'
@@ -145,9 +151,10 @@ async function sync() {
     sessions.clear()
     for (const [id, item] of next) sessions.set(id, item)
     port?.postMessage({
-      profile, browser: browserName, done, url_revision: urlRevision, url_offset: urlBuffer.length,
+      profile, browser: browserName, done, lesson_requests: lessonRequests, url_revision: urlRevision, url_offset: urlBuffer.length,
       tabs: [...sessions.values()].slice(0, 120).map(item => ({ id: item.token, title: item.title.slice(0, 160) })),
     })
+    lessonRequests = {}
     done = {}
   } finally {
     busy = false

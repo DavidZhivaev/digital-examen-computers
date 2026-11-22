@@ -129,7 +129,7 @@ def loginctl():
 def session_fields(session):
     code, output = run([loginctl(), "show-session", session, "-p", "Name", "-p", "Active",
                         "-p", "Type", "-p", "Display", "-p", "Class", "-p", "Seat",
-                        "-p", "Leader", "-p", "User", "-p", "State"], 5)
+                        "-p", "Leader", "-p", "User", "-p", "State", "-p", "LockedHint"], 5)
     values = {}
     if code != 0:
         return values

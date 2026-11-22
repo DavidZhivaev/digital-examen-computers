@@ -7,6 +7,8 @@ import threading
 import time
 import uuid
 
+import de_lesson_activity
+
 SOCKET = "/run/digital-examen/browser-tabs.sock"
 TOKEN = re.compile(r"[0-9a-f]{32}")
 BROWSERS = {"Chromium", "Chrome", "Edge", "Firefox", "Яндекс", "Opera", "Brave", "Vivaldi"}
@@ -58,6 +60,13 @@ def process(uid, data):
                 token, title = item.get("id"), item.get("title")
                 if isinstance(token, str) and TOKEN.fullmatch(token) and isinstance(title, str):
                     tabs[token] = {"id": token, "title": title[:500], "browser": browser}
+        counts = data.get("lesson_requests")
+        if isinstance(counts, dict) and len(counts) <= 2:
+            minute = int(time.time()) // 60 * 60
+            for stamp in (minute - 60, minute):
+                count = counts.get(str(stamp))
+                if type(count) is int and 0 < count <= 100000:
+                    de_lesson_activity.record(stamp=stamp, count=count)
         PROFILES[profile] = (now, tabs)
         for token, success in (data.get("done") or {}).items():
             pending = PENDING.get(token)

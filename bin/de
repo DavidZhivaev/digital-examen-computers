@@ -70,6 +70,10 @@ def computer(name):
             CACHE.unlink(missing_ok=True)
     token = login()
     try:
+        control("lesson-login", token=token)
+    except (OSError, ValueError):
+        pass
+    try:
         if RUNTIME.stat().st_uid == os.getuid():
             descriptor = os.open(CACHE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
             with os.fdopen(descriptor, "w") as output:
