@@ -21,6 +21,7 @@ import urllib.request
 sys.path.insert(0, "/usr/local/lib/digital-examen")
 
 import de_ansible_network
+import de_block_history
 import de_common
 import de_patterns
 import de_inspection
@@ -47,6 +48,7 @@ AI_HOSTS = de_patterns.read_list(os.path.join(
 LOCK = threading.Lock()
 PEOPLE = set()
 EXPECTED_RULES = None
+VPN_ENABLED = False
 
 def blocked_response():
     body = de_inspection.block_page()
@@ -75,7 +77,12 @@ def installed_rules():
 
 
 def rules_up():
-    global EXPECTED_RULES
+    global EXPECTED_RULES, VPN_ENABLED
+    vpn_enabled = (de_inspection.RUN / "vpn-on").exists()
+    vpn_interfaces = '{ "tun*", "tap*", "wg*", "ppp*" }'
+    vpn_filter = "oifname %s %s" % (vpn_interfaces, "accept" if vpn_enabled else "reject")
+    if vpn_enabled:
+        vpn_filter += "\n        udp dport { 500, 1194, 4500, 51820 } accept"
     current = installed_rules()
     prefix = "delete table inet %s\n" % TABLE if current is not None else ""
     users = "elements = { %s }" % ", ".join(map(str, sorted(PEOPLE))) if PEOPLE else ""
@@ -87,6 +94,7 @@ table inet %(table)s {
     }
     chain nat_out {
         type nat hook output priority -100; policy accept;
+        meta skuid @people oifname %(vpn_interfaces)s return
         meta skuid @people ip daddr != 127.0.0.0/8 tcp dport { 80, 443 } redirect to :%(proxy)d
         meta skuid @people ip6 daddr != ::1 tcp dport { 80, 443 } redirect to :%(proxy)d
         meta skuid @people meta nfproto ipv4 udp dport 53 redirect to :%(dns)d
@@ -95,6 +103,7 @@ table inet %(table)s {
     chain filter_out {
         type filter hook output priority 0; policy accept;
         meta skuid != @people accept
+        %(vpn_filter)s
         ip daddr 127.0.0.1 tcp dport %(proxy)d accept
         ip6 daddr ::1 tcp dport %(proxy)d accept
         ip daddr 127.0.0.1 udp dport %(dns)d accept
@@ -106,7 +115,10 @@ table inet %(table)s {
     }
 }
 """ % {"table": TABLE, "proxy": PROXY_PORT, "dns": DNS_PORT,
-        "inspect": de_inspection.LISTEN_PORT, "origin": de_inspection.ORIGIN_PORT, "users": users})
+        "inspect": de_inspection.LISTEN_PORT, "origin": de_inspection.ORIGIN_PORT, "users": users,
+        "vpn_interfaces": vpn_interfaces, "vpn_filter": vpn_filter})
+    if ok:
+        VPN_ENABLED = vpn_enabled
     EXPECTED_RULES = installed_rules() if ok else None
     return ok
 
@@ -159,7 +171,7 @@ def rules_down():
 
 def update_people():
     global PEOPLE, EXPECTED_RULES
-    current = {entry.pw_uid for entry in de_common.people()}
+    current = {entry.pw_uid for entry in de_common.people()} if de_inspection.groups.get() else set()
     if current == PEOPLE:
         return True
     script = "flush set inet %s people\n" % TABLE
@@ -177,7 +189,8 @@ def people_loop():
     while True:
         time.sleep(PEOPLE_EVERY)
         try:
-            if EXPECTED_RULES is None or installed_rules() != EXPECTED_RULES:
+            if (EXPECTED_RULES is None or (de_inspection.RUN / "vpn-on").exists() != VPN_ENABLED
+                    or installed_rules() != EXPECTED_RULES):
                 if rules_up():
                     log("правила сети восстановлены")
             update_people()
@@ -444,7 +457,12 @@ def inspect_http(client, upstream, data, host, port):
         body, request_fields.get(b"content-encoding", b"identity").decode("latin-1").lower(),
         de_inspection.body_scan_limit(request_fields.get(b"content-type", b"").decode("latin-1"), len(body)),
     ) if scan else b""
-    if de_inspection.url_blocked(host, url, rules) or (scan and de_inspection.matches_content([head, checked_body], rules)):
+    denial = de_inspection.url_denial(host, url, rules)
+    if not denial and scan and de_inspection.matches_content([head, checked_body], rules):
+        terms = de_inspection.matching_terms([head, checked_body], de_inspection.content_terms(rules))
+        denial = de_inspection.phrase_denial(terms, rules)
+    if denial:
+        de_block_history.remember(url, *denial)
         client.sendall(blocked_response())
         return True
     path = target[len(b"http://" + de_upstream.authority(host, port).encode("ascii")):]
@@ -470,9 +488,11 @@ def inspect_http(client, upstream, data, host, port):
             encoding = reply.headers.get("Content-Encoding", "identity").lower()
             if limit:
                 prefix = reply.read(limit)
-            if de_inspection.matches_content(
-                    [head, checked_body, (status + "\r\n" + response_headers).encode("latin-1"),
-                     de_inspection.text_prefix(prefix, encoding, limit)], rules):
+            parts = [head, checked_body, (status + "\r\n" + response_headers).encode("latin-1"),
+                     de_inspection.text_prefix(prefix, encoding, limit)]
+            if de_inspection.matches_content(parts, rules):
+                terms = de_inspection.matching_terms(parts, de_inspection.content_terms(rules))
+                de_block_history.remember(url, *de_inspection.phrase_denial(terms, rules))
                 client.sendall(blocked_response())
                 return True
         excluded = {"connection", "transfer-encoding", "trailer", "upgrade", "keep-alive"}
@@ -544,11 +564,14 @@ class Handler(socketserver.BaseRequestHandler):
             return
 
         verdict, group = decide(host)
-        inspect_tls = port == 443
+        inspect_tls = port == 443 and not de_inspection.permanent_allow(host)
         if verdict != "pass" and not inspect_tls and (
                 verdict == "ai_block" or port != 80 or group not in {rule.get("name") for rule in de_inspection.groups.get()
                                             if rule.get("url_allow")}):
             note_block(host, login, group)
+            url = "%s://%s/" % ("https" if secure or tunnel else "http", de_upstream.authority(host, port))
+            denial = de_inspection.url_denial(host, url, de_inspection.groups.get())
+            de_block_history.remember(url, *(denial or ("Классификация домена", group, host)))
             if not secure:
                 try:
                     client.sendall(blocked_response())

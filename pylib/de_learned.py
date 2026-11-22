@@ -51,9 +51,14 @@ def remember(url, terms):
     write(LOCAL, dict(list(rows.items())[-2048:]))
 
 
-def blocked(url, terms):
+def blocked_terms(url, terms):
     if not url or not terms:
-        return False
+        return ()
     known = local.get().get(url, {})
+    shared_terms = shared.get().get(url, ())
     now = int(time.time())
-    return any(known.get(term, 0) > now or term in shared.get().get(url, ()) for term in terms)
+    return tuple(term for term in terms if known.get(term, 0) > now or term in shared_terms)
+
+
+def blocked(url, terms):
+    return bool(blocked_terms(url, terms))

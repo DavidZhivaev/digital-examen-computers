@@ -16,6 +16,10 @@ LISTEN_PORT = 3130
 ORIGIN_PORT = 3140
 BLOCK_PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'; base-uri 'none'"
 MAX_BODY = 131072
+RUN = Path("/run/digital-examen")
+PERMANENT_ALLOW = ("*.1580.ru", "*.silvertests.ru")
+AD_HOSTS = frozenset({"ad.doubleclick.net", "googleads.g.doubleclick.net", "pagead2.googlesyndication.com",
+                      "securepubads.g.doubleclick.net", "ads.adfox.ru"})
 
 
 def host_name(value):
@@ -175,7 +179,18 @@ def search_return_url(host, target):
     return ""
 
 
+def permanent_allow(host):
+    return any(de_patterns.host_matches(pattern, host) for pattern in PERMANENT_ALLOW)
+
+
+def ad_request(host, destination):
+    return (destination in {"script", "image", "iframe", "empty"} and host_name(host) in AD_HOSTS
+            and not (RUN / "adblocker-off").exists())
+
+
 def host_allowed(host, rules):
+    if permanent_allow(host):
+        return True
     exceptions = getattr(rules, "host_exceptions", None)
     if exceptions is None:
         exceptions = (rule.get("always_allow") for rule in rules)
@@ -186,19 +201,39 @@ def url_allowed(host, target, rules):
     return host_allowed(host, rules) or any(url_matches(rule.get("url_allow"), target) for rule in rules)
 
 
-def url_blocked(host, target, rules):
+def url_denial(host, target, rules):
     if host_allowed(host, rules):
-        return False
+        return None
     for rule in rules:
         if url_matches(rule.get("url_allow"), target):
             continue
-        if de_patterns.any_match(rule.get("denied"), host) or url_matches(rule.get("url_denied"), target):
-            return True
+        patterns = rule.get("denied")
+        if de_patterns.any_match(patterns, host):
+            pattern = next((line for line in patterns if line and not line.startswith("!")
+                            and de_patterns.matches(line, host)), host)
+            return "Чёрный список", rule.get("name", ""), pattern
+        if url_matches(rule.get("url_denied"), target):
+            return "Чёрный список URL", rule.get("name", ""), host
         if rule.get("principle") == "allow":
             redirected = search_return_url(host, target)
-            return (not redirected or not url_matches(rule.get("url_allow"), redirected)
-                    or url_matches(rule.get("url_denied"), redirected))
-    return False
+            if not redirected or not url_matches(rule.get("url_allow"), redirected):
+                return "Вне белого списка", rule.get("name", ""), host
+            if url_matches(rule.get("url_denied"), redirected):
+                return "Чёрный список URL", rule.get("name", ""), host
+            return None
+    return None
+
+
+def url_blocked(host, target, rules):
+    return url_denial(host, target, rules) is not None
+
+
+def phrase_denial(terms, rules):
+    for rule in rules:
+        for phrase in rule.get("request_deny", []):
+            if phrase.casefold() in terms:
+                return "Триггер-фраза", rule.get("name", ""), phrase
+    return "Фильтр содержимого", "", ""
 
 
 JS_LIMIT = 32 * 1024

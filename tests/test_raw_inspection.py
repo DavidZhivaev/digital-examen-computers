@@ -40,6 +40,27 @@ class RawInspectionTests(unittest.TestCase):
         self.assertTrue(matches("192.0.2.0/24", "192.0.2.10"))
         self.assertTrue(matches("2001:db8::/32", "2001:0db8::1"))
 
+    def test_block_history_keeps_fifty_records_without_query_values(self):
+        import de_block_history
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(de_block_history, "HISTORY", Path(directory) / "history.json"):
+                for number in range(55):
+                    de_block_history.remember("https://example.org/%d?key=secret" % number,
+                                              "Триггер-фраза", "Группа", "Триггер")
+                rows = de_block_history.read()
+                self.assertEqual(len(rows), 50)
+                self.assertEqual(rows[0][1], "https://example.org/5")
+                self.assertEqual(rows[-1][1:], ["https://example.org/54", "Триггер-фраза", "Группа", "Триггер"])
+                self.assertEqual(de_block_history.HISTORY.stat().st_mode & 0o777, 0o600)
+
+    def test_no_restriction_groups_means_no_redirected_users(self):
+        with patch.object(de_inspection.groups, "get", return_value=[]), patch.object(relay, "PEOPLE", {509}), \
+                patch.object(relay, "nft", return_value=True) as nft, patch.object(relay, "installed_rules"):
+            self.assertTrue(relay.update_people())
+            self.assertEqual(relay.PEOPLE, set())
+            nft.assert_called_once_with("flush set inet de_agent people\n")
+
     def test_group_priorities_and_blacklist_union(self):
         first = {"priority": 1, "principle": "allow", "always_allow": ["a.example"]}
         second = {"priority": 50, "denied": ["a.example", "b.example"]}
@@ -62,10 +83,10 @@ class RawInspectionTests(unittest.TestCase):
 
     def test_never_block_domains_apply_at_every_priority(self):
         rules = de_inspection.load_groups(json.dumps({"groups": [
-            {"priority": 1, "principle": "allow", "denied": ["*.1580.ru", "silvertests.ru"]},
-            {"priority": 50, "always_allow": ["*.1580.ru", "silvertests.ru"]},
+            {"priority": 1, "principle": "allow", "denied": ["*.1580.ru", "silvertests.ru", "trusted.example"]},
+            {"priority": 50, "always_allow": ["trusted.example"]},
         ]}))
-        for host in ("sdo.1580.ru", "silvertests.ru"):
+        for host in ("sdo.1580.ru", "silvertests.ru", "trusted.example"):
             self.assertTrue(de_inspection.host_allowed(host, rules))
             self.assertFalse(de_inspection.url_blocked(host, "https://" + host, rules))
             with patch.object(de_inspection.groups, "get", return_value=rules):
@@ -151,18 +172,18 @@ class RawInspectionTests(unittest.TestCase):
     def test_response_phrase_in_raw_http_body(self):
         phrase = "<p>САЙТ ЗАКРЫТ ОГРАНИЧЕНИЯМИ ШКОЛЫ</p>".encode()
         for body, status, allowed in ((b"ordinary page", b"200", []), (phrase, b"403", []),
-                                      (phrase, b"200", ["*.1580.ru"])):
+                                      (phrase, b"200", ["*.example.org"])):
             with self.subTest(body=body):
                 client, browser = socket.socketpair()
                 upstream, origin = socket.socketpair()
                 with client, browser, upstream, origin:
                     origin.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
                                    b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
-                    data = b"GET / HTTP/1.1\r\nHost: sdo.1580.ru\r\n\r\n"
+                    data = b"GET / HTTP/1.1\r\nHost: school.example.org\r\n\r\n"
                     with patch.object(relay.de_inspection.groups, "get",
                                       return_value=[{"request_deny": ["Сайт закрыт ограничениями школы"],
                                                      "always_allow": allowed}]):
-                        relay.inspect_http(client, upstream, data, "sdo.1580.ru", 80)
+                        relay.inspect_http(client, upstream, data, "school.example.org", 80)
                     client.shutdown(socket.SHUT_WR)
                     with browser.makefile("rb") as response:
                         page = response.read()
@@ -179,10 +200,10 @@ class RawInspectionTests(unittest.TestCase):
 
     def test_full_url_rule_matches_origin_instead_of_a_url_in_the_query(self):
         blocked = relay.de_inspection.url_blocked
-        rules = [{"principle": "allow", "url_allow": ["https://*.1580.ru/login/*"]}]
-        self.assertFalse(blocked("sdo.1580.ru", "https://sdo.1580.ru/login/index.php?next=/", rules))
-        self.assertTrue(blocked("other.example", "https://other.example/?next=https://sdo.1580.ru/login/", rules))
-        self.assertTrue(blocked("sdo.1580.ru", "https://sdo.1580.ru/help?next=/login/", rules))
+        rules = [{"principle": "allow", "url_allow": ["https://*.example.org/login/*"]}]
+        self.assertFalse(blocked("school.example.org", "https://school.example.org/login/index.php?next=/", rules))
+        self.assertTrue(blocked("other.example", "https://other.example/?next=https://school.example.org/login/", rules))
+        self.assertTrue(blocked("school.example.org", "https://school.example.org/help?next=/login/", rules))
 
     def test_encoded_request_and_compressed_response_can_match(self):
         rules = [{"request_allow": ["ИИ"], "request_deny": ["Режим ИИ"]}]

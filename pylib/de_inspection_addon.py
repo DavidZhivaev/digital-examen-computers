@@ -9,6 +9,7 @@ from mitmproxy import http
 from urllib.parse import parse_qs, urljoin, urlsplit
 
 import de_common
+import de_block_history
 import de_learned
 import de_inspection as inspection
 
@@ -21,7 +22,18 @@ def blocked():
     })
 
 
-def block_response_headers(flow):
+def deny(flow, reason, group="", trigger=""):
+    de_block_history.remember(flow.request.pretty_url, reason, group, trigger)
+    flow.response = blocked()
+
+
+def deny_phrase(flow, parts, rules):
+    terms = inspection.matching_terms(parts, inspection.content_terms(rules))
+    deny(flow, *inspection.phrase_denial(terms, rules))
+
+
+def block_response_headers(flow, denial):
+    de_block_history.remember(flow.request.pretty_url, *denial)
     response = blocked()
     chunks = iter(([response.raw_content],) if flow.request.method != "HEAD" else ())
     response.stream = lambda _: next(chunks, [])
@@ -155,31 +167,40 @@ def request(flow):
     rules = inspection.groups.get()
     if not rules or inspection.host_allowed(request.host, rules):
         return
-    domain_blocked = inspection.url_blocked(request.host, request.pretty_url, rules)
+    domain_blocked = inspection.url_denial(request.host, request.pretty_url, rules)
     ai_enabled = any(rule.get("ai_auto") for rule in rules)
     cached_ai_block = (ai_enabled and flow.client_conn.id in AI_BLOCKED_CONNECTIONS
                        and not inspection.url_allowed(request.host, request.pretty_url, rules))
-    if domain_blocked or cached_ai_block:
-        flow.response = blocked()
+    if domain_blocked:
+        deny(flow, *domain_blocked)
+        return
+    if cached_ai_block:
+        deny(flow, "Классификация домена", next((rule.get("name", "") for rule in rules if rule.get("ai_auto")), ""), request.host)
+        return
+    if inspection.ad_request(request.host, request.headers.get("sec-fetch-dest", "")):
+        deny(flow, "Реклама", "Блокировщик рекламы", request.host)
         return
     host = inspection.host_name(request.host)
     if (host in inspection.YANDEX_SEARCH_HOSTS or inspection.google_search_host(host)
             or host in {"suggest.yandex.ru", "suggest.yandex.net", "suggest.yandex.com"}):
         query = urlsplit(request.path).query
         if query and inspection.matches_content([query.encode()], rules):
-            flow.response = blocked()
+            deny_phrase(flow, [query.encode()], rules)
             return
     if not scans_content(request, rules):
         return
-    if request.method == "GET" and de_learned.blocked(de_learned.endpoint(request.pretty_url), inspection.content_terms(rules)):
-        flow.response = blocked()
-        return
+    if request.method == "GET":
+        known = de_learned.blocked_terms(de_learned.endpoint(request.pretty_url), inspection.content_terms(rules))
+        if known:
+            deny(flow, *inspection.phrase_denial(known, rules))
+            return
     if ai_enabled and ai_request(request):
-        flow.response = blocked()
+        deny(flow, "Запрос к ИИ", next((rule.get("name", "") for rule in rules if rule.get("ai_auto")), ""), request.host)
         return
     if inspection.content_terms(rules):
-        if inspection.matches_content([request_text(request)], rules):
-            flow.response = blocked()
+        raw = request_text(request)
+        if inspection.matches_content([raw], rules):
+            deny_phrase(flow, [raw], rules)
             return
         if request.headers.get("sec-fetch-dest", "") not in (
                 "style", "font", "image", "audio", "video", "script", "track"):
@@ -218,8 +239,11 @@ def topic_denied(flow, rules):
     body = text_body(flow.response)
     match = HTML_TITLE.search(body)
     title = html.unescape(match.group(1).decode("utf-8", "replace")) if match else ""
-    return bool((wiki_ai and WIKI_AI_TOPIC.search(title))
-                or (games and (GAMES_TITLE.search(title) or VIDEO_GAME_MARKUP.search(body))))
+    if wiki_ai and WIKI_AI_TOPIC.search(title):
+        return "Классификация страницы", next(rule.get("name", "") for rule in rules if rule.get("ai_auto")), title
+    if games and (GAMES_TITLE.search(title) or VIDEO_GAME_MARKUP.search(body)):
+        return "Классификация страницы", "Игры", title
+    return None
 
 
 def responseheaders(flow):
@@ -232,18 +256,24 @@ def responseheaders(flow):
     if location and 300 <= before.status_code < 400:
         target = urljoin(flow.request.pretty_url, location)
         host = urlsplit(target).hostname
-        if host and (inspection.url_blocked(host, target, rules)
-                     or (not inspection.url_allowed(host, target, rules)
-                         and any(rule.get("ai_auto") for rule in rules) and ai_url(target))):
-            block_response_headers(flow)
-            return
+        if host:
+            denial = inspection.url_denial(host, target, rules)
+            if denial is None and not inspection.url_allowed(host, target, rules) and ai_url(target):
+                group = next((rule for rule in rules if rule.get("ai_auto")), None)
+                if group is not None:
+                    denial = ("Переадресация на ИИ", group.get("name", ""), host)
+            if denial:
+                block_response_headers(flow, denial)
+                return
     if not inspection.content_terms(rules) and not any(page_topics(flow, rules)):
         if not yandex_html(flow) or before.stream or not small_yandex_page(before):
             before.stream = True
             stream_yandex_style(flow)
         return
-    if inspection.matches_content([response_text(before, b"")], rules):
-        block_response_headers(flow)
+    raw = response_text(before, b"")
+    if inspection.matches_content([raw], rules):
+        block_response_headers(flow, inspection.phrase_denial(
+            inspection.matching_terms([raw], inspection.content_terms(rules)), rules))
         return
     if (flow.request.method == "HEAD" or before.status_code < 200
             or before.status_code in (204, 304) or not scan_limit(before)):
@@ -290,8 +320,9 @@ async def response(flow):
     rules = inspection.groups.get()
     if not before.stream and scans_content(flow.request, rules):
         if before.raw_content and scan_limit(before):
-            if topic_denied(flow, rules):
-                flow.response = blocked()
+            denial = topic_denied(flow, rules)
+            if denial:
+                deny(flow, *denial)
                 return
             if inspection.content_terms(rules):
                 await scan_buffered_response(flow, rules)
@@ -343,11 +374,13 @@ async def scan_buffered_response(flow, rules):
     url = de_learned.endpoint(flow.request.pretty_url) if flow.request.method == "GET" else ""
     future = enqueue_scan(url, inspection.matching_terms, [raw], inspection.content_terms(rules))
     if future is None:
-        flow.response = blocked()
+        deny(flow, "Очередь проверки заполнена")
         return
     done, _ = await asyncio.wait([future], timeout=SCAN_TIMEOUT)
-    if not done or future.result():
-        flow.response = blocked()
+    if not done:
+        deny(flow, "Истекло время проверки")
+    elif future.result():
+        deny(flow, *inspection.phrase_denial(future.result(), rules))
 
 
 def response_text(reply, body):
@@ -358,8 +391,15 @@ def response_text(reply, body):
 def websocket_message(flow):
     rules = inspection.groups.get()
     message = flow.websocket.messages[-1]
-    if scans_content(flow.request, rules) and inspection.content_terms(rules):
-        if (not message.is_text or len(message.content) > inspection.MAX_BODY
-                or inspection.matches_content([request_text(flow.request), message.content], rules)):
+    terms = inspection.content_terms(rules)
+    if terms and scans_content(flow.request, rules):
+        if not message.is_text or len(message.content) > inspection.MAX_BODY:
+            de_block_history.remember(flow.request.pretty_url, "Бинарный или слишком большой WebSocket")
             message.drop()
+        else:
+            parts = [request_text(flow.request), message.content]
+            if inspection.matches_content(parts, rules):
+                denied = inspection.matching_terms(parts, terms)
+                de_block_history.remember(flow.request.pretty_url, *inspection.phrase_denial(denied, rules))
+                message.drop()
     del flow.websocket.messages[:-1]

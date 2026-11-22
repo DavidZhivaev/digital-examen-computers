@@ -13,12 +13,15 @@ import socket
 import subprocess
 import sys
 import time
+import shutil
+import textwrap
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 API = "https://ex.1580.ru/api"
 RUNTIME = Path("/run/user") / str(os.getuid())
 CACHE = RUNTIME / "digital-examen-cli"
+STATE = Path("/run/digital-examen")
 
 
 def request(path, body=None, token=None):
@@ -76,19 +79,78 @@ def computer(name):
     return request(path, token=token)
 
 
+def require_local_admin():
+    if os.geteuid() != 0:
+        os.execvp("sudo", ["sudo", "-n", "--", "/usr/local/bin/de", *sys.argv[1:]])
+
+
+def history():
+    require_local_admin()
+    location = STATE / "block-history.json"
+    try:
+        events = json.loads(location.read_text())
+    except FileNotFoundError:
+        events = []
+    if not events:
+        print("Блокировок с момента загрузки нет.")
+        return
+    width = max(55, shutil.get_terminal_size((100, 24)).columns)
+    columns = (8, width - 42, 28)
+    row = "{:<%d}  {:<%d}  {}" % columns[:2]
+    print(row.format("Время", "URL", "Причина / группа / условие"))
+    for stamp, url, reason, group, trigger in reversed(events):
+        detail = " / ".join(value for value in (reason, group, trigger) if value)
+        clean = lambda value: "".join(ch if ch.isprintable() else " " for ch in value)
+        urls = textwrap.wrap(clean(url), columns[1]) or [""]
+        details = textwrap.wrap(clean(detail), columns[2]) or [""]
+        stamp = time.strftime("%H:%M:%S", time.localtime(stamp))
+        for address, note in itertools.zip_longest(urls, details, fillvalue=""):
+            print(row.format(stamp, address, note))
+            stamp = ""
+
+
+def toggle(action, value):
+    flag = STATE / ("adblocker-off" if action == "adblocker" else "vpn-on")
+    default = "on" if action == "adblocker" else "off"
+    if value != "status":
+        require_local_admin()
+        STATE.mkdir(mode=0o755, parents=True, exist_ok=True)
+        if value == default:
+            flag.unlink(missing_ok=True)
+        else:
+            flag.touch(mode=0o600)
+    enabled = flag.exists() == (default == "off")
+    print("%s %s" % (action, "on" if enabled else "off"))
+
+
 def main():
-    parser = argparse.ArgumentParser(prog="de")
+    parser = argparse.ArgumentParser(prog="de", description="Управление школьным компьютером")
     commands = parser.add_subparsers(dest="action", required=True)
-    commands.add_parser("help", help="Показать справку")
-    commands.add_parser("list")
-    commands.add_parser("status")
-    commands.add_parser("update")
-    ssh = commands.add_parser("ssh")
-    ssh.add_argument("computer")
-    ssh.add_argument("user", nargs="?")
+    descriptions = {
+        "help": "Показать список команд. Для аргументов конкретной команды используй de <команда> --help.",
+        "list": "Показать группы ограничений, назначенные этому компьютеру. Требуется вход оператора на сайт.",
+        "status": "Показать доступность компьютера, последний сигнал и состояние служб агента.",
+        "update": "Запросить штатное обновление агента и получить ответ, не дожидаясь установки.",
+        "history": "Показать до 50 последних блокировок с URL, причинами, группами и условиями. Журнал обнуляется при перезагрузке.",
+        "ssh": "Открыть обычный SSH. С именем пользователя требуется ключ. root запрашивает sudo в удалённом сеансе.",
+        "adblocker": "Показать состояние или включить блокировку рекламных ресурсов. После перезагрузки режим on.",
+        "vpn": "Показать состояние или разрешить трафик через системные VPN-интерфейсы. После перезагрузки режим off.",
+    }
+    parsers = {name: commands.add_parser(name, help=description, description=description)
+               for name, description in descriptions.items()}
+    parsers["ssh"].add_argument("computer", help="Номер компьютера, например 5k-100-1")
+    parsers["ssh"].add_argument("user", nargs="?", help="Учётная запись на целевом компьютере")
+    for name in ("adblocker", "vpn"):
+        parsers[name].add_argument("mode", choices=("on", "off", "status"), nargs="?", default="status")
     args = parser.parse_args()
     if args.action == "help":
         parser.print_help()
+        return
+    if args.action == "history":
+        history()
+        return
+    if args.action in ("adblocker", "vpn"):
+        toggle(args.action, args.mode)
         return
     if args.action == "update":
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as request_socket:
@@ -112,6 +174,9 @@ def main():
         corpus, room, number = re.findall(r"\d+", name)
         host = "m1580-%d-%d-%d" % (int(corpus), int(room), int(number))
         command = ["ssh", "-o", "BatchMode=yes"]
+        if host == socket.gethostname().split(".", 1)[0]:
+            command.extend(["-o", "HostKeyAlias=" + host])
+            host = "127.0.0.1"
         if args.user == "root":
             uid = int(os.environ.get("SUDO_UID", "0")) if os.getuid() == 0 else os.getuid()
             account = pwd.getpwuid(uid).pw_name
