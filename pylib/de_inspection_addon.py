@@ -294,6 +294,8 @@ async def response(flow):
                 before.raw_content = inspection.filter_yandex_html(before.raw_content)
             else:
                 before.raw_content = inspection.insert_yandex_style(before.raw_content)
+            if "content-length" in before.headers:
+                before.headers["content-length"] = str(len(before.raw_content))
 
 
 def enqueue_scan(url, scan, *args):
