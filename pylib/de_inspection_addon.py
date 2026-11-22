@@ -177,10 +177,6 @@ def request(flow):
     if cached_ai_block:
         deny(flow, "Классификация домена", next((rule.get("name", "") for rule in rules if rule.get("ai_auto")), ""), request.host)
         return
-    if inspection.ad_request(request.host, request.headers.get("sec-fetch-dest", "")):
-        de_block_history.remember(request.pretty_url, "Реклама", "Блокировщик рекламы", request.host)
-        flow.response = http.Response.make(204, b"", {"Cache-Control": "no-store"})
-        return
     host = inspection.host_name(request.host)
     if (host in inspection.YANDEX_SEARCH_HOSTS or inspection.google_search_host(host)
             or host in {"suggest.yandex.ru", "suggest.yandex.net", "suggest.yandex.com"}):

@@ -18,8 +18,6 @@ BLOCK_PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; 
 MAX_BODY = 131072
 RUN = Path("/run/digital-examen")
 PERMANENT_ALLOW = ("*.1580.ru", "*.silvertests.ru")
-AD_HOSTS = frozenset({"ad.doubleclick.net", "googleads.g.doubleclick.net", "pagead2.googlesyndication.com",
-                      "securepubads.g.doubleclick.net", "ads.adfox.ru"})
 
 
 def host_name(value):
@@ -181,11 +179,6 @@ def search_return_url(host, target):
 
 def permanent_allow(host):
     return any(de_patterns.host_matches(pattern, host) for pattern in PERMANENT_ALLOW)
-
-
-def ad_request(host, destination):
-    return (destination in {"script", "image", "iframe", "empty"} and host_name(host) in AD_HOSTS
-            and not (RUN / "adblocker-off").exists())
 
 
 def host_allowed(host, rules):

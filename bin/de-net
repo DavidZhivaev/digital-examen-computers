@@ -80,6 +80,7 @@ def rules_up():
     global EXPECTED_RULES, VPN_ENABLED
     vpn_enabled = (de_inspection.RUN / "vpn-on").exists()
     vpn_interfaces = '{ "tun*", "tap*", "wg*", "ppp*" }'
+    vpn_nat = "meta skuid @people oifname %s return" % vpn_interfaces if vpn_enabled else ""
     vpn_filter = "oifname %s %s" % (vpn_interfaces, "accept" if vpn_enabled else "reject")
     if vpn_enabled:
         vpn_filter += "\n        udp dport { 500, 1194, 4500, 51820 } accept"
@@ -94,7 +95,7 @@ table inet %(table)s {
     }
     chain nat_out {
         type nat hook output priority -100; policy accept;
-        meta skuid @people oifname %(vpn_interfaces)s return
+        %(vpn_nat)s
         meta skuid @people ip daddr != 127.0.0.0/8 tcp dport { 80, 443 } redirect to :%(proxy)d
         meta skuid @people ip6 daddr != ::1 tcp dport { 80, 443 } redirect to :%(proxy)d
         meta skuid @people meta nfproto ipv4 udp dport 53 redirect to :%(dns)d
@@ -116,7 +117,7 @@ table inet %(table)s {
 }
 """ % {"table": TABLE, "proxy": PROXY_PORT, "dns": DNS_PORT,
         "inspect": de_inspection.LISTEN_PORT, "origin": de_inspection.ORIGIN_PORT, "users": users,
-        "vpn_interfaces": vpn_interfaces, "vpn_filter": vpn_filter})
+        "vpn_nat": vpn_nat, "vpn_filter": vpn_filter})
     if ok:
         VPN_ENABLED = vpn_enabled
     EXPECTED_RULES = installed_rules() if ok else None
