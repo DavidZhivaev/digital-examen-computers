@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 import pwd
+import re
 import socket
 import socketserver
 import struct
@@ -651,35 +652,44 @@ def upstream_dns():
     return ipaddress.ip_address("127.0.0.53")
 
 
-def question_end(packet):
+def dns_question(packet):
+    if not 17 <= len(packet) <= 4096:
+        return None
+    _, flags, questions, answers, authority, _ = struct.unpack("!6H", packet[:12])
+    if flags & 0xf800 or questions != 1 or answers or authority:
+        return None
     place = 12
-    while place < len(packet):
+    while place < min(len(packet), 267):
         size = packet[place]
         if size == 0:
-            break
+            end = place + 5
+            if end <= len(packet):
+                kind, klass = struct.unpack("!HH", packet[place + 1:end])
+                if klass == 1:
+                    return kind, end
+            return None
+        label = packet[place + 1:place + size + 1]
+        if not 1 <= size <= 63 or len(label) != size or not re.fullmatch(rb"[A-Za-z0-9_-]+", label):
+            return None
         place += 1 + size
-    return place + 5
+    return None
 
 
-def question_type(packet):
-    end = question_end(packet)
-    if end > len(packet):
-        return 0
-    return struct.unpack("!H", packet[end - 4:end - 2])[0]
-
-
-def empty_answer(packet):
+def empty_answer(packet, end):
     flags = struct.unpack("!H", packet[2:4])[0]
-    flags = 0x8000 | (flags & 0x7900) | 0x0080
-    return packet[:2] + struct.pack("!HHHHH", flags, 1, 0, 0, 0) + packet[12:question_end(packet)]
+    flags = 0x8000 | (flags & 0x0100) | 0x0080
+    return packet[:2] + struct.pack("!HHHHH", flags, 1, 0, 0, 0) + packet[12:end]
 
 
 def answer_dns(server, packet, sender):
-    if len(packet) < 12:
+    question = dns_question(packet)
+    if question is None:
         return
-    if question_type(packet) in (64, 65):
-        server.sendto(empty_answer(packet), sender)
+    kind, end = question
+    if kind not in (1, 12, 28):
+        server.sendto(empty_answer(packet, end), sender)
         return
+    packet = packet[:4] + struct.pack("!4H", 1, 0, 0, 0) + packet[12:end]
     upstream = upstream_dns()
     family = socket.AF_INET6 if upstream.version == 6 else socket.AF_INET
     outside = socket.socket(family, socket.SOCK_DGRAM)

@@ -52,6 +52,14 @@ class RawInspectionTests(unittest.TestCase):
         for host in ("a.example", "b.example", "c.example"):
             self.assertTrue(de_inspection.url_blocked(host, "https://" + host, rules))
 
+    def test_dns_rejects_non_queries_and_encoded_labels(self):
+        header = bytes.fromhex("123401000001000000000000")
+        question = b"\x07example\x03org\x00\x00\x01\x00\x01"
+        message = header + question
+        self.assertEqual(relay.dns_question(message), (1, len(message)))
+        self.assertIsNone(relay.dns_question(message[:2] + b"\x81" + message[3:]))
+        self.assertIsNone(relay.dns_question(header + b"\xc0\x0c\x00\x01\x00\x01"))
+
     def test_never_block_domains_apply_at_every_priority(self):
         rules = de_inspection.load_groups(json.dumps({"groups": [
             {"priority": 1, "principle": "allow", "denied": ["*.1580.ru", "silvertests.ru"]},

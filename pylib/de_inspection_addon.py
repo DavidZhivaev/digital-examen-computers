@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import html
 import json
 import re
+import zlib
 
 from mitmproxy import http
 from urllib.parse import parse_qs, urljoin, urlsplit
@@ -191,7 +192,8 @@ def request(flow):
     if ai_enabled and request.method == "GET":
         if inspection.yandex_search(request.host, request.path):
             flow.metadata["de_yandex_search"] = True
-            request.anticomp()
+            if not inspection.content_terms(rules):
+                request.anticomp()
             request.headers.pop("if-none-match", None)
             request.headers.pop("if-modified-since", None)
         path = inspection.google_web_search_path(request.host, request.path)
@@ -293,12 +295,27 @@ async def response(flow):
                 return
             if inspection.content_terms(rules):
                 await scan_buffered_response(flow, rules)
-        if flow.response is before and yandex_html(flow) and before.raw_content:
+        if (flow.response is before and flow.metadata.get("de_yandex_search") and before.raw_content
+                and before.status_code == 200
+                and before.headers.get("content-type", "").split(";", 1)[0].strip().lower() == "text/html"):
+            data = before.raw_content
+            encoding = before.headers.get("content-encoding", "identity").lower()
+            if encoding in ("gzip", "deflate"):
+                try:
+                    decoder = zlib.decompressobj(31 if encoding == "gzip" else 15)
+                    data = decoder.decompress(data, 8 * 1024 * 1024)
+                    if not decoder.eof:
+                        return
+                except zlib.error:
+                    return
+                before.headers.pop("content-encoding", None)
+            elif encoding not in ("", "identity"):
+                return
             add_yandex_style_headers(before)
-            if len(before.raw_content) <= inspection.MAX_BODY:
-                before.raw_content = inspection.filter_yandex_html(before.raw_content)
+            if len(data) <= inspection.MAX_BODY:
+                before.raw_content = inspection.filter_yandex_html(data)
             else:
-                before.raw_content = inspection.insert_yandex_style(before.raw_content)
+                before.raw_content = inspection.insert_yandex_style(data)
             if "content-length" in before.headers:
                 before.headers["content-length"] = str(len(before.raw_content))
 
@@ -341,9 +358,8 @@ def response_text(reply, body):
 def websocket_message(flow):
     rules = inspection.groups.get()
     message = flow.websocket.messages[-1]
-    if (scans_content(flow.request, rules) and inspection.content_terms(rules) and message.is_text
-            and inspection.matches_content([
-        request_text(flow.request), message.content[:inspection.MAX_BODY],
-    ], rules)):
-        message.drop()
+    if scans_content(flow.request, rules) and inspection.content_terms(rules):
+        if (not message.is_text or len(message.content) > inspection.MAX_BODY
+                or inspection.matches_content([request_text(flow.request), message.content], rules)):
+            message.drop()
     del flow.websocket.messages[:-1]
