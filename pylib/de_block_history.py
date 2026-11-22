@@ -5,7 +5,7 @@ from pathlib import Path
 import time
 from urllib.parse import urlsplit
 
-HISTORY = Path("/run/digital-examen/block-history.json")
+HISTORY = Path("/run/digital-examen-blocks/history.json")
 
 
 def read():

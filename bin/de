@@ -86,7 +86,7 @@ def require_local_admin():
 
 def history():
     require_local_admin()
-    location = STATE / "block-history.json"
+    location = Path("/run/digital-examen-blocks/history.json")
     try:
         events = json.loads(location.read_text())
     except FileNotFoundError:
