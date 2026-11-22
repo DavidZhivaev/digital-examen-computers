@@ -1,6 +1,9 @@
 iframe[src^="https://googleads.g.doubleclick.net/"],
 iframe[src^="https://securepubads.g.doubleclick.net/"],
 iframe[src^="https://ads.adfox.ru/"],
-ins.adsbygoogle[data-ad-slot] {
+ins.adsbygoogle[data-ad-slot],
+div[id^="yandex_rtb_R-A-"],
+div[id^="yandex_rtb_R-I-"],
+div[id^="adfox_"] > iframe[src^="https://ads.adfox.ru/"] {
   display: none !important;
 }

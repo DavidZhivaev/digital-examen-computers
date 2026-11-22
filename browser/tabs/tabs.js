@@ -67,7 +67,7 @@ function allowedUrl(url) {
 function updateCosmeticCSS(tabId, url) {
   if (tabId == null || !/^https?:/.test(url ?? '')) return
   const host = new URL(url).hostname.toLowerCase().replace(/\.$/, '')
-  if (/(^|\.)(1580\.ru|silvertests\.ru)$/.test(host)) return
+  if (/(^|\.)1580\.ru$/.test(host)) return
   const details = { target: { tabId }, files: ['cosmetic.css'], origin: 'USER' }
   const action = adblocker ? 'insertCSS' : 'removeCSS'
   api.scripting[action](details).catch(() => {})
