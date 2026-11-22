@@ -15,6 +15,7 @@ import urllib.request
 sys.path.insert(0, "/usr/local/lib/digital-examen")
 
 import de_common
+import de_inspection
 import de_learned
 import de_mass_commands
 import de_tabs
@@ -213,7 +214,8 @@ def stats_loop():
             policy = json.loads(de_common.read_file(POLICY_FILE) or "{}")
             groups = policy.get("groups", [])
             rules = list(dict.fromkeys(rule for group in groups for rule in group.get("tab_titles", [])))
-            url_groups = [{
+            url_groups = [{"allow": [], "deny": [], "domains": list(de_inspection.PERMANENT_ALLOW)}]
+            url_groups += [{
                 "allow": group.get("url_allow", []),
                 "deny": [],
                 "domains": group.get("always_allow", []),
