@@ -135,13 +135,26 @@ def grab_wayland(login, session_id):
         values = de_common.user_env(entry.pw_uid, "WAYLAND_DISPLAY")
         if not values:
             return None
-        WAYLAND_ENV.update(key=key, expires=now + 15, env=de_common.session_env(entry, values))
+        cache = os.path.join(WORK_DIR, "cache-%d" % entry.pw_uid)
+        try:
+            os.mkdir(cache, 0o700)
+            os.chown(cache, entry.pw_uid, entry.pw_gid)
+        except FileExistsError:
+            pass
+        except OSError:
+            cache = ""
+        env = de_common.session_env(entry, values)
+        if cache:
+            details = os.stat(cache, follow_symlinks=False)
+            if stat.S_ISDIR(details.st_mode) and details.st_uid == entry.pw_uid:
+                env["XDG_CACHE_HOME"] = cache
+        WAYLAND_ENV.update(key=key, expires=now + 15, env=env)
     env = dict(WAYLAND_ENV["env"], QT_QPA_PLATFORM="wayland")
     try:
         with tempfile.TemporaryDirectory(dir=WORK_DIR) as folder:
             os.chown(folder, entry.pw_uid, entry.pw_gid)
             env["XDG_CONFIG_HOME"] = folder
-            env["XDG_CACHE_HOME"] = folder
+            env.setdefault("XDG_CACHE_HOME", folder)
             formats = ("png",) if WAYLAND_ENV.get("png_only") == key else ("bmp", "png")
             for image_format in formats:
                 shot = os.path.join(folder, "screen." + image_format)
