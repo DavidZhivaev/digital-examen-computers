@@ -40,6 +40,40 @@ class RawInspectionTests(unittest.TestCase):
         self.assertTrue(matches("192.0.2.0/24", "192.0.2.10"))
         self.assertTrue(matches("2001:db8::/32", "2001:0db8::1"))
 
+    def test_local_operator_control_requires_a_confirmed_site_identity(self):
+        import io
+        import socket
+        import threading
+        import de_control
+
+        def invoke(mode):
+            client, server = socket.socketpair()
+            with client, server:
+                worker = threading.Thread(target=de_control.Control, args=(server, None, None))
+                worker.start()
+                with client.makefile("rwb") as stream:
+                    stream.write(json.dumps({"action": "block", "mode": mode, "token": "test"}).encode() + b"\n")
+                    stream.flush()
+                    result = json.loads(stream.readline())
+                worker.join()
+                return result
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            with patch.object(de_control, "RUN", state), \
+                    patch.object(de_common, "setting", return_value="https://example.org"), \
+                    patch.object(de_common, "computer", return_value="5k-100-1"), \
+                    patch.object(de_control, "urlopen") as check:
+                check.side_effect = OSError("site unavailable")
+                self.assertIn("error", invoke("off"))
+                self.assertFalse((state / "block-off").exists())
+                check.side_effect = None
+                check.return_value.__enter__.side_effect = lambda: io.BytesIO(b'{"name":"5k-100-1"}')
+                self.assertEqual(invoke("off"), {"mode": "off"})
+                self.assertTrue((state / "block-off").exists())
+                self.assertEqual(invoke("on"), {"mode": "on"})
+                self.assertFalse((state / "block-off").exists())
+
     def test_block_history_keeps_fifty_records_without_query_values(self):
         import de_block_history
 
