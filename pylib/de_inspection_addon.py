@@ -27,6 +27,12 @@ def block_response_headers(flow):
 
 
 MANAGEMENT_HOST = urlsplit(de_common.setting("DE_API_URL", "https://ex.1580.ru")).hostname
+WIKI_AI_TOPIC = re.compile(
+    r"искусственн\w+ интеллект\w*|artificial intelligence|machine learning|машинн\w+ обучени\w*"
+    r"|нейронн\w+ сет\w*|neural networks?|chatgpt|large language models?|больш\w+ языков\w+ модел\w*",
+    re.IGNORECASE,
+)
+HTML_TITLE = re.compile(br"<title\b[^>]*>([^<]{1,4096})</title\s*>", re.IGNORECASE)
 GROUP_CONFIG_PATH = re.compile(r"/api/computers/groups(?:/[0-9]+(?:/save)?)?/?$")
 
 
@@ -180,6 +186,13 @@ def request(flow):
             request.path = path
 
 
+def checks_wiki_title(flow, rules):
+    host = inspection.host_name(flow.request.host)
+    return ((host == "wikipedia.org" or host.endswith(".wikipedia.org"))
+            and flow.response.headers.get("content-type", "").split(";", 1)[0].strip().lower() == "text/html"
+            and any(rule.get("ai_auto") for rule in rules))
+
+
 def responseheaders(flow):
     before = flow.response
     rules = inspection.groups.get()
@@ -195,7 +208,7 @@ def responseheaders(flow):
                          and any(rule.get("ai_auto") for rule in rules) and ai_url(target))):
             block_response_headers(flow)
             return
-    if not inspection.content_terms(rules):
+    if not inspection.content_terms(rules) and not checks_wiki_title(flow, rules):
         if not yandex_html(flow) or before.stream or not small_yandex_page(before):
             before.stream = True
             stream_yandex_style(flow)
@@ -247,8 +260,14 @@ async def response(flow):
     before = flow.response
     rules = inspection.groups.get()
     if not before.stream and scans_content(flow.request, rules):
-        if inspection.content_terms(rules) and before.raw_content and scan_limit(before):
-            await scan_buffered_response(flow, rules)
+        if before.raw_content and scan_limit(before):
+            if checks_wiki_title(flow, rules):
+                match = HTML_TITLE.search(text_body(before))
+                if match and WIKI_AI_TOPIC.search(inspection.html.unescape(match.group(1).decode("utf-8", "replace"))):
+                    flow.response = blocked()
+                    return
+            if inspection.content_terms(rules):
+                await scan_buffered_response(flow, rules)
         if flow.response is before and yandex_html(flow) and before.raw_content:
             add_yandex_style_headers(before)
             if len(before.raw_content) <= inspection.MAX_BODY:

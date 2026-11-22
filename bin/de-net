@@ -31,7 +31,6 @@ TABLE = "de_agent"
 RELAY_MARK = 0x44450000
 SCHOOL_PROXY_MARK = 0x44450001
 RELAY_RULE = ["pref", "8999", "fwmark", hex(RELAY_MARK) + "/0xffffffff", "lookup", "main"]
-POLICY_FILE = os.path.join(de_common.STATE_DIR, "policy.json")
 TRAFFIC_SOCKET = os.path.join(de_common.RUN_DIR, "traffic.sock")
 AI_URL = de_common.setting("DE_API_URL", "").rstrip("/") + "/api/computers/device/ai"
 PEOPLE_EVERY = 10
@@ -44,7 +43,6 @@ AI_HOSTS = de_patterns.read_list(os.path.join(
     de_common.setting("DE_REPO_DIR", "/opt/digital-examen-computers"),
     "proxy", "policy", "ai-domains.txt",
 ))
-POLICY = {"stamp": 0, "data": {}}
 LOCK = threading.Lock()
 PEOPLE = set()
 EXPECTED_RULES = None
@@ -197,22 +195,6 @@ def reconcile_loop():
         time.sleep(15)
 
 
-def policy():
-    try:
-        stamp = os.path.getmtime(POLICY_FILE)
-    except OSError:
-        return POLICY["data"]
-    if stamp != POLICY["stamp"]:
-        try:
-            candidate = json.loads(open(POLICY_FILE).read())
-            if isinstance(candidate, dict):
-                POLICY["data"] = candidate
-        except (IOError, ValueError):
-            return POLICY["data"]
-        POLICY["stamp"] = stamp
-    return POLICY["data"]
-
-
 def classify_host(host):
     answer, ttl = False, 30
     try:
@@ -247,7 +229,7 @@ def ask_ai(host):
 
 
 def decide(host):
-    groups = sorted(policy().get("groups", []), key=lambda item: -int(item.get("priority", 50)))
+    groups = de_inspection.groups.get()
     for group in groups:
         if de_patterns.any_match(group.get("always_allow"), host):
             return "pass", group.get("name") or "Всегда разрешено"

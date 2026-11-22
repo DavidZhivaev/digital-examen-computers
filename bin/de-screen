@@ -81,7 +81,7 @@ def to_image(data):
 
 
 def grab_x11(display, xauth):
-    target = os.path.join(WORK_DIR, "x11.png")
+    target = os.path.join(WORK_DIR, "x11.bmp")
     env = {"DISPLAY": display, "PATH": "/usr/bin:/bin"}
     if xauth:
         env["XAUTHORITY"] = xauth
@@ -487,6 +487,7 @@ def main():
     ready_at = 0
     misses = 0
 
+    scale_worker = None
     while True:
         started = time.monotonic()
         if not screen_enabled():
@@ -529,7 +530,9 @@ def main():
             continue
 
         if time.monotonic() >= scale_due:
-            set_display_scale(session)
+            if scale_worker is None or not scale_worker.is_alive():
+                scale_worker = threading.Thread(target=set_display_scale, args=(session,), daemon=True)
+                scale_worker.start()
             scale_due = time.monotonic() + 30
 
         picture = grab(session)

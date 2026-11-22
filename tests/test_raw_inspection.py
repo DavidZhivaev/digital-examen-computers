@@ -3,6 +3,8 @@ from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
 from io import StringIO
 from builtins import open as real_open
+import asyncio
+import json
 import base64
 import gzip
 import socket
@@ -30,17 +32,48 @@ with patch("builtins.open", side_effect=open_test_config):
 
 
 class RawInspectionTests(unittest.TestCase):
-    def test_late_stream_releases_bytes_and_checks_the_same_prefix(self):
-        from de_inspection import StreamPrefix
+    def test_group_priorities_and_blacklist_union(self):
+        first = {"priority": 1, "principle": "allow", "always_allow": ["a.example"]}
+        second = {"priority": 50, "denied": ["a.example", "b.example"]}
+        rules = de_inspection.load_groups(json.dumps({"groups": [second, first]}))
+        for host, denied in (("a.example", False), ("b.example", True), ("c.example", True)):
+            self.assertEqual(de_inspection.url_blocked(host, "https://" + host, rules), denied)
 
-        deferred = Mock()
-        prefix = StreamPrefix(8, Mock(), deferred, deadline=10)
-        with patch("de_inspection.time.monotonic", side_effect=[9.9, 10.1, 10.2]):
-            self.assertEqual(prefix(b"abc"), b"")
-            self.assertEqual(prefix(b"def"), b"abcdef")
-            self.assertEqual(prefix(b"ghijk"), b"ghijk")
-        deferred.assert_called_once_with(b"abcdefgh")
-        self.assertEqual(prefix(b"tail"), b"tail")
+        first = {"priority": 1, "denied": ["c.example"]}
+        rules = de_inspection.load_groups(json.dumps({"groups": [second, first]}))
+        for host in ("a.example", "b.example", "c.example"):
+            self.assertTrue(de_inspection.url_blocked(host, "https://" + host, rules))
+
+    def test_inspector_sends_block_page_for_chunked_content_and_wiki_topics(self):
+        try:
+            from mitmproxy import http
+        except ImportError:
+            self.skipTest("mitmproxy is required for the HTTPS inspection hooks")
+        with patch.object(de_common, "setting", side_effect=lambda key, default: default):
+            import de_inspection_addon as addon
+
+        for url, page, rules in (
+            ("https://example.org/", b"<p>Denied phrase</p>", [{"request_deny": ["denied phrase"]}]),
+            ("https://ru.wikipedia.org/wiki/AI", "<title>Искусственный интеллект — Википедия</title>".encode(),
+             [{"ai_auto": True}]),
+        ):
+            flow = Mock(request=http.Request.make("GET", url))
+            flow.response = http.Response.make(200, page, {"content-type": "text/html"})
+            del flow.response.headers["content-length"]
+            flow.response.stream = True
+            with patch.object(de_inspection.groups, "get", return_value=rules):
+                addon.responseheaders(flow)
+                self.assertFalse(flow.response.stream)
+                asyncio.run(addon.response(flow))
+            self.assertEqual(flow.response.status_code, 403)
+            self.assertIn(b"<html", flow.response.raw_content.lower())
+
+        flow = Mock(request=http.Request.make("GET", "https://yandex.ru/search/?text=Denied+phrase"),
+                    response=None)
+        rules = [{"request_deny": ["denied phrase"], "url_allow": ["yandex.ru/search*"]}]
+        with patch.object(de_inspection.groups, "get", return_value=rules):
+            addon.request(flow)
+        self.assertEqual(flow.response.status_code, 403)
 
     def test_learned_endpoints_follow_active_terms_and_expire(self):
         import de_learned
@@ -170,14 +203,8 @@ class RawInspectionTests(unittest.TestCase):
         inline_policy = "style-src 'unsafe-inline'; script-src 'none'"
         self.assertEqual(inspection.yandex_style_policy(inline_policy), inline_policy)
 
-    def test_stream_does_not_emit_empty_http_chunks_while_waiting_for_prefix(self):
+    def test_yandex_stream_does_not_emit_empty_http_chunks(self):
         inspection = relay.de_inspection
-        prefix = inspection.StreamPrefix(8, lambda data: b"deny" in data)
-        transform = inspection.stream_chunks(prefix)
-        self.assertEqual(transform(b"de"), [])
-        self.assertEqual(transform(b"ny rest"), [])
-        self.assertEqual(transform(b""), [])
-
         transform = inspection.stream_chunks(inspection.YandexStyleStream(True))
         self.assertEqual(transform(b"<!doc"), [])
         parts = transform(b"type html><body>links")

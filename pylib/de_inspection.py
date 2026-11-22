@@ -7,7 +7,6 @@ import zlib
 import html
 from html.parser import HTMLParser
 import re
-import time
 from urllib.parse import parse_qs, parse_qsl, unquote_plus, urlencode, urlsplit
 
 import de_patterns
@@ -45,7 +44,11 @@ class CachedFile:
 
 
 def load_groups(text):
-    return json.loads(text).get("groups", [])
+    ordered = sorted(json.loads(text).get("groups", []), key=lambda rule: rule.get("priority", 50))
+    for index, rule in enumerate(ordered):
+        if rule.get("principle") == "allow":
+            return ordered[:index + 1]
+    return ordered
 
 
 groups = CachedFile(POLICY_FILE, load_groups, [])
@@ -88,40 +91,6 @@ def message_text(first_line, headers, body):
     fields = b"\r\n".join(key + b": " + value for key, value in headers)
     return first_line + b"\r\n" + fields + b"\r\n\r\n" + (body or b"")[:MAX_BODY]
 
-
-
-class StreamPrefix:
-    def __init__(self, limit, denied, defer=None, deadline=None):
-        self.defer = defer
-        self.deadline = deadline
-        self.released = False
-        self.limit = limit
-        self.denied = denied
-        self.pending = bytearray()
-        self.blocked = None
-
-    def __call__(self, chunk):
-        if self.blocked is not None:
-            return b"" if self.blocked else chunk
-        previous = len(self.pending)
-        taken = min(self.limit - previous, len(chunk))
-        self.pending.extend(chunk[:taken])
-        complete = not chunk or len(self.pending) == self.limit
-        late = self.deadline is not None and time.monotonic() >= self.deadline
-        if not complete and not late:
-            return b""
-        prefix = bytes(self.pending)
-        output = chunk if self.released else prefix[:previous] + chunk
-        if late:
-            self.released = True
-        if complete:
-            self.pending.clear()
-            if self.released:
-                self.defer(prefix)
-                self.blocked = False
-            else:
-                self.blocked = self.denied(prefix)
-        return b"" if self.blocked else output
 
 
 def stream_chunks(transform):
@@ -206,15 +175,16 @@ def url_allowed(host, target, rules):
 
 
 def url_blocked(host, target, rules):
-    if url_allowed(host, target, rules):
-        return False
-    if any(de_patterns.any_match(rule.get("denied"), host)
-           or url_matches(rule.get("url_denied"), target) for rule in rules):
-        return True
-    redirected = search_return_url(host, target)
-    if redirected and any(url_matches(rule.get("url_allow"), redirected) for rule in rules):
-        return any(url_matches(rule.get("url_denied"), redirected) for rule in rules)
-    return any(rule.get("principle") == "allow" for rule in rules)
+    for rule in rules:
+        if url_allowed(host, target, (rule,)):
+            continue
+        if de_patterns.any_match(rule.get("denied"), host) or url_matches(rule.get("url_denied"), target):
+            return True
+        if rule.get("principle") == "allow":
+            redirected = search_return_url(host, target)
+            return (not redirected or not url_matches(rule.get("url_allow"), redirected)
+                    or url_matches(rule.get("url_denied"), redirected))
+    return False
 
 
 JS_LIMIT = 32 * 1024
