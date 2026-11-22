@@ -45,11 +45,9 @@ def address_matches(pattern, host):
 
 
 def matches(pattern, host):
-    if "/" in pattern:
-        return address_matches(pattern, host)
-    if address_matches(pattern, host):
+    if "/" not in pattern and host_matches(pattern, host):
         return True
-    return host_matches(pattern, host)
+    return (":" in host or host[-1:].isdigit()) and address_matches(pattern, host)
 
 
 def any_match(lines, host):

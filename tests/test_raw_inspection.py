@@ -32,6 +32,14 @@ with patch("builtins.open", side_effect=open_test_config):
 
 
 class RawInspectionTests(unittest.TestCase):
+    def test_domain_patterns_and_ip_networks(self):
+        from de_patterns import matches
+
+        self.assertTrue(matches("*.example.org", "www.example.org"))
+        self.assertFalse(matches("192.0.2.0/24", "example.org"))
+        self.assertTrue(matches("192.0.2.0/24", "192.0.2.10"))
+        self.assertTrue(matches("2001:db8::/32", "2001:0db8::1"))
+
     def test_group_priorities_and_blacklist_union(self):
         first = {"priority": 1, "principle": "allow", "always_allow": ["a.example"]}
         second = {"priority": 50, "denied": ["a.example", "b.example"]}

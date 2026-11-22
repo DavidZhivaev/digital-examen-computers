@@ -532,9 +532,14 @@ class Handler(socketserver.BaseRequestHandler):
 
         if not secure and not tunnel and port == 80 and de_inspection.host_name(host) in {"ya.ru", "www.ya.ru"}:
             try:
-                client.sendall(b"HTTP/1.1 302 Found\r\nLocation: https://yandex.ru/\r\n"
-                               b"Content-Length: 0\r\nConnection: close\r\n\r\n")
-            except OSError:
+                request, _ = de_upstream.http_request(data, host, port)
+                target = request.split(b"\r\n", 1)[0].split()[1]
+                path = target[len(b"http://" + de_upstream.authority(host, port).encode("ascii")):]
+                if any(byte < 33 or byte > 126 for byte in path):
+                    return
+                client.sendall(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://yandex.ru" + path
+                               + b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            except (OSError, ValueError):
                 pass
             return
 

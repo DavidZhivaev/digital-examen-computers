@@ -155,7 +155,8 @@ def request(flow):
         flow.response = blocked()
         return
     host = inspection.host_name(request.host)
-    if (host in inspection.YANDEX_SEARCH_HOSTS or inspection.google_search_host(host)):
+    if (host in inspection.YANDEX_SEARCH_HOSTS or inspection.google_search_host(host)
+            or host in {"suggest.yandex.ru", "suggest.yandex.net", "suggest.yandex.com"}):
         query = urlsplit(request.path).query
         if query and inspection.matches_content([query.encode()], rules):
             flow.response = blocked()
