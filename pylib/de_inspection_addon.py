@@ -20,6 +20,7 @@ def blocked():
     return http.Response.make(403, inspection.block_page(), {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store",
+        "Content-Security-Policy": inspection.BLOCK_PAGE_CSP,
     })
 
 

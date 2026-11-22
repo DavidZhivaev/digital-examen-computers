@@ -52,7 +52,8 @@ EXPECTED_RULES = None
 def blocked_response():
     body = de_inspection.block_page()
     return (b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/html; charset=utf-8\r\n"
-            b"Cache-Control: no-store\r\nContent-Length: " + str(len(body)).encode()
+            b"Cache-Control: no-store\r\nContent-Security-Policy: " + de_inspection.BLOCK_PAGE_CSP.encode("ascii")
+            + b"\r\nContent-Length: " + str(len(body)).encode()
             + b"\r\nConnection: close\r\n\r\n" + body)
 
 
