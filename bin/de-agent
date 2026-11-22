@@ -222,9 +222,9 @@ def stats_loop():
             } for group in groups
                 if group.get("url_allow") or group.get("always_allow")]
         except (ValueError, TypeError):
-            rules, url_groups = [], []
+            rules, url_groups, groups = [], [], []
         admin = login and de_common.is_admin(login)
-        de_tabs.activate(identity, None if admin else rules, [] if admin else url_groups)
+        de_tabs.activate(identity, None if admin else rules, [] if admin else url_groups, bool(groups) and not admin)
 
         uptime = first_number("/proc/uptime")
         try:

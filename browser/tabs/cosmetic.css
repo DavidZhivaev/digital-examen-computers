@@ -1,0 +1,6 @@
+iframe[src^="https://googleads.g.doubleclick.net/"],
+iframe[src^="https://securepubads.g.doubleclick.net/"],
+iframe[src^="https://ads.adfox.ru/"],
+ins.adsbygoogle[data-ad-slot] {
+  display: none !important;
+}

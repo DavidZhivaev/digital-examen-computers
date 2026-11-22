@@ -18,16 +18,18 @@ URL_JSON = "[]"
 URL_REVISION = uuid.uuid4().hex
 PROFILES = {}
 PENDING = {}
+ADBLOCKER = False
 
 
-def activate(session, rules, url_groups):
-    global SESSION, RULES, URL_GROUPS, URL_JSON, URL_REVISION
+def activate(session, rules, url_groups, adblocker=False):
+    global SESSION, RULES, URL_GROUPS, URL_JSON, URL_REVISION, ADBLOCKER
     with READY:
         if SESSION != session:
             PROFILES.clear()
             PENDING.clear()
         SESSION = session
         RULES = rules
+        ADBLOCKER = adblocker
         if URL_GROUPS != url_groups:
             URL_GROUPS = url_groups
             URL_JSON = json.dumps(url_groups, separators=(",", ":"))
@@ -66,6 +68,7 @@ def process(uid, data):
                               if item[0] == profile and item[1] > now and item[2] is None]}
         if RULES is not None:
             response["rules"] = RULES
+            response["adblocker"] = ADBLOCKER and not os.path.exists("/run/digital-examen/adblocker-off")
         if "url_revision" in data:
             offset = data.get("url_offset")
             if data["url_revision"] != URL_REVISION:

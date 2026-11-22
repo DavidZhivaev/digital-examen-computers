@@ -9,6 +9,7 @@ import os
 import pwd
 import re
 import socket
+import signal
 import socketserver
 import struct
 import subprocess
@@ -197,6 +198,21 @@ def people_loop():
             update_people()
         except Exception as error:
             log("список людей не собран: %s" % error)
+
+
+def stop_games():
+    executable = "/usr/bin/gcompris-qt"
+    while True:
+        if PEOPLE and os.path.isfile(executable):
+            found = subprocess.run(["pgrep", "-x", "gcompris-qt"], stdout=subprocess.PIPE, text=True)
+            for pid in found.stdout.split():
+                process = "/proc/" + pid
+                try:
+                    if os.stat(process).st_uid in PEOPLE and os.readlink(process + "/exe") == executable:
+                        os.kill(int(pid), signal.SIGTERM)
+                except OSError:
+                    pass
+        time.sleep(0.5)
 
 
 def reconcile_loop():
@@ -775,6 +791,7 @@ def main():
         log("не удалось настроить прямой маршрут веб-реле")
     threading.Thread(target=origin.serve_forever, daemon=True).start()
     threading.Thread(target=people_loop, daemon=True).start()
+    threading.Thread(target=stop_games, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     notification = os.environ.get("NOTIFY_SOCKET")
     if notification:

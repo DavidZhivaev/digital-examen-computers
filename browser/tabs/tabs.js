@@ -17,6 +17,7 @@ let schoolSession = false
 let firstReply = []
 
 let urlRevision = ''
+let adblocker = false
 let urlBuffer = ''
 let urlGroups = []
 let requestFilters = ''
@@ -61,6 +62,23 @@ function allowedUrl(url) {
     || (domains.some((pattern) => !pattern.startsWith('!') && matchesHost(pattern))
         && !domains.some((pattern) => pattern.startsWith('!') && matchesHost(pattern.slice(1))))
   ))
+}
+
+function updateCosmeticCSS(tabId, url) {
+  if (tabId == null || !/^https?:/.test(url ?? '')) return
+  const host = new URL(url).hostname.toLowerCase().replace(/\.$/, '')
+  if (/(^|\.)(1580\.ru|silvertests\.ru)$/.test(host)) return
+  const details = { target: { tabId }, files: ['cosmetic.css'], origin: 'USER' }
+  const action = adblocker ? 'insertCSS' : 'removeCSS'
+  api.scripting[action](details).catch(() => {})
+}
+
+function setAdblocker(enabled) {
+  if (enabled === adblocker) return
+  adblocker = enabled
+  api.tabs.query({}).then((tabs) => {
+    for (const tab of tabs) updateCosmeticCSS(tab.id, tab.url)
+  }).catch(() => {})
 }
 
 function blockedUrl(url) {
@@ -143,6 +161,7 @@ function connect() {
     schoolSession = false
     for (const respond of firstReply.splice(0)) respond(false)
     port = undefined
+    setAdblocker(false)
     rules = []
     urlRevision = ''
     urlBuffer = ''
@@ -151,6 +170,7 @@ function connect() {
   })
   port.onMessage.addListener(async (message) => {
     schoolSession = Array.isArray(message.rules)
+    setAdblocker(schoolSession && message.adblocker === true)
     rules = schoolSession ? message.rules : []
     const update = message.url_policy
     if (!schoolSession) {
@@ -184,6 +204,10 @@ function connect() {
 }
 
 api.runtime.onMessage.addListener((message, sender, respond) => {
+  if (message.type === 'cosmetic-adblock') {
+    if (adblocker && sender.frameId === 0) updateCosmeticCSS(sender.tab?.id, sender.url)
+    return
+  }
   if (message.type !== 'school-session') return
   if (schoolSession || !port) {
     respond(schoolSession)
