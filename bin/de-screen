@@ -377,7 +377,8 @@ def remember(body, frame_no):
 
 
 def screen_enabled():
-    return de_common.read_file(de_common.SCREEN_ENABLED_FILE) != "0"
+    return (de_common.read_file(de_common.SCREEN_ENABLED_FILE) != "0"
+            and not os.path.exists(os.path.join(de_common.RUN_DIR, "screen-off")))
 
 
 
@@ -401,6 +402,8 @@ class Senders:
             self.live_frame = None
 
     def post(self, connection, body):
+        if not screen_enabled():
+            raise OSError("Отправка экрана отключена")
         answer = connection.post(body)
         self.watch = (int(answer.get("interval", 0)), time.monotonic())
 

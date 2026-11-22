@@ -15,6 +15,7 @@ import urllib.request
 sys.path.insert(0, "/usr/local/lib/digital-examen")
 
 import de_common
+import de_control
 import de_inspection
 import de_learned
 import de_mass_commands
@@ -212,7 +213,7 @@ def stats_loop():
                 pass
         try:
             policy = json.loads(de_common.read_file(POLICY_FILE) or "{}")
-            groups = policy.get("groups", [])
+            groups = [] if (de_control.RUN / "block-off").exists() else policy.get("groups", [])
             rules = list(dict.fromkeys(rule for group in groups for rule in group.get("tab_titles", [])))
             url_groups = [{"allow": [], "deny": [], "domains": list(de_inspection.PERMANENT_ALLOW)}]
             url_groups += [{
@@ -360,6 +361,7 @@ def learned_loop():
 
 
 def main():
+    threading.Thread(target=de_control.listen, daemon=True).start()
     if not URL or not COMPUTER:
         log("компьютер не на учёте, агент ждёт")
         time.sleep(300)

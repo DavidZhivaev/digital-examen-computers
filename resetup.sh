@@ -222,6 +222,9 @@ if [ "$remove" = --remove ]; then
     if [ -f "$state/installed-files" ]; then
         while IFS= read -r path; do
             case "$path" in
+                /usr/bin/de)
+                    if [ "$(readlink "$path")" = /usr/local/bin/de ]; then unlink "$path"; fi
+                    ;;
                 /etc/systemd/system/de-*.service|/etc/systemd/system/de-*.timer|/etc/systemd/system/de-*.socket)
                     [ -f "$path" ] || continue
                     systemctl disable --now "${path##*/}"

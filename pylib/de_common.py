@@ -245,7 +245,7 @@ def people():
     for entry in pwd.getpwall():
         if entry.pw_shell not in shells or entry.pw_shell.endswith(("nologin", "false")):
             continue
-        if entry.pw_uid == 0:
+        if is_admin(entry.pw_name):
             continue
         privileges = subprocess.run(
             ["sudo", "-n", "-l", "-U", entry.pw_name],

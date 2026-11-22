@@ -84,13 +84,20 @@ def require_local_admin():
         os.execvp("sudo", ["sudo", "-n", "--", "/usr/local/bin/de", *sys.argv[1:]])
 
 
+def control(action, **arguments):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(8)
+        client.connect(str(STATE / "control.sock"))
+        client.sendall(json.dumps({"action": action, **arguments}).encode() + b"\n")
+        with client.makefile() as stream:
+            answer = json.loads(stream.readline())
+    if "error" in answer:
+        raise ValueError(answer["error"])
+    return answer
+
+
 def history():
-    require_local_admin()
-    location = Path("/run/digital-examen-blocks/history.json")
-    try:
-        events = json.loads(location.read_text())
-    except FileNotFoundError:
-        events = []
+    events = control("history")["history"]
     if not events:
         print("Блокировок с момента загрузки нет.")
         return
@@ -134,6 +141,8 @@ def main():
         "history": "Показать до 50 последних блокировок с URL, причинами, группами и условиями. Журнал обнуляется при перезагрузке.",
         "ssh": "Открыть обычный SSH. С именем пользователя требуется ключ. root запрашивает sudo в удалённом сеансе.",
         "adblocker": "Показать состояние или включить блокировку рекламных ресурсов. После перезагрузки режим on.",
+        "block": "Временно переключить интернет-фильтр с входом оператора. После загрузки компьютера фильтр включён.",
+        "screen": "Временно переключить отправку кадров с входом оператора. После загрузки компьютера отправка разрешена.",
         "vpn": "Показать состояние или разрешить трафик через системные VPN-интерфейсы. После перезагрузки режим off.",
     }
     parsers = {name: commands.add_parser(name, help=description, description=description)
@@ -142,9 +151,15 @@ def main():
     parsers["ssh"].add_argument("user", nargs="?", help="Учётная запись на целевом компьютере")
     for name in ("adblocker", "vpn"):
         parsers[name].add_argument("mode", choices=("on", "off", "status"), nargs="?", default="status")
+    for name in ("block", "screen"):
+        parsers[name].add_argument("mode", choices=("on", "off"))
     args = parser.parse_args()
     if args.action == "help":
         parser.print_help()
+        return
+    if args.action in ("block", "screen"):
+        answer = control(args.action, mode=args.mode, token=login())
+        print(args.action, answer["mode"])
         return
     if args.action == "history":
         history()
@@ -171,8 +186,7 @@ def main():
     if args.action == "ssh" and args.user:
         if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_.-]{0,63}", args.user):
             raise ValueError("Некорректное имя пользователя SSH")
-        corpus, room, number = re.findall(r"\d+", name)
-        host = "m1580-%d-%d-%d" % (int(corpus), int(room), int(number))
+        host = computer(name)["hostname"]
         command = ["ssh", "-o", "BatchMode=yes"]
         if host == socket.gethostname().split(".", 1)[0]:
             command.extend(["-o", "HostKeyAlias=" + host])
@@ -187,7 +201,7 @@ def main():
 
     data = computer(name)
     if args.action == "ssh":
-        os.execvp("ssh", ["ssh", "--", data["hostname"]])
+        os.execvp("ssh", ["ssh", "-o", "BatchMode=yes", "--", data["hostname"]])
     elif args.action == "list":
         print(json.dumps(data["policy"]["groups"], ensure_ascii=False, indent=2))
     else:

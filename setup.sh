@@ -51,6 +51,10 @@ for script in "$here"/bin/de "$here"/bin/de-*; do
         *) put 0750 "$script" "/usr/local/sbin/$name" ;;
     esac
 done
+if [ ! -e /usr/bin/de ] || [ "$(readlink /usr/bin/de)" = /usr/local/bin/de ]; then
+    ln -sfn /usr/local/bin/de /usr/bin/de
+    printf '%s\n' /usr/bin/de >> "$manifest"
+fi
 put 0644 "$here/config/de-history.sh" /etc/profile.d/de-history.sh
 for native in /etc/chromium/native-messaging-hosts /etc/chromium-browser/native-messaging-hosts \
     /etc/opt/chrome/native-messaging-hosts /etc/opt/edge/native-messaging-hosts; do

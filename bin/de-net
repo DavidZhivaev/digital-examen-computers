@@ -171,9 +171,19 @@ def rules_down():
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def inspector_ready():
+    try:
+        with socket.create_connection(("127.0.0.1", de_inspection.LISTEN_PORT), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
 def update_people():
     global PEOPLE, EXPECTED_RULES
-    current = {entry.pw_uid for entry in de_common.people()} if de_inspection.groups.get() else set()
+    enabled = (de_inspection.groups.get() and not (de_inspection.RUN / "block-off").exists()
+               and inspector_ready())
+    current = {entry.pw_uid for entry in de_common.people()} if enabled else set()
     if current == PEOPLE:
         return True
     script = "flush set inet %s people\n" % TABLE
