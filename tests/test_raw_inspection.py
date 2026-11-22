@@ -52,7 +52,7 @@ class RawInspectionTests(unittest.TestCase):
         for host in ("a.example", "b.example", "c.example"):
             self.assertTrue(de_inspection.url_blocked(host, "https://" + host, rules))
 
-    def test_inspector_sends_block_page_for_chunked_content_and_wiki_topics(self):
+    def test_inspector_sends_block_page_for_chunked_content_and_topics(self):
         try:
             from mitmproxy import http
         except ImportError:
@@ -62,6 +62,7 @@ class RawInspectionTests(unittest.TestCase):
 
         for url, page, rules in (
             ("https://example.org/", b"<p>Denied phrase</p>", [{"request_deny": ["denied phrase"]}]),
+            ("https://example.org/", "<title>Бесплатные игры — сайт</title>".encode(), [{"name": "Игры"}]),
             ("https://ru.wikipedia.org/wiki/AI", "<title>Искусственный интеллект — Википедия</title>".encode(),
              [{"ai_auto": True}]),
         ):
@@ -75,6 +76,14 @@ class RawInspectionTests(unittest.TestCase):
                 asyncio.run(addon.response(flow))
             self.assertEqual(flow.response.status_code, 403)
             self.assertIn(b"<html", flow.response.raw_content.lower())
+
+        flow = Mock(request=http.Request.make("GET", "https://example.org/"))
+        flow.response = http.Response.make(200, "<title>История видеоигр</title>".encode(),
+                                           {"content-type": "text/html"})
+        with patch.object(de_inspection.groups, "get", return_value=[{"name": "Игры"}]):
+            addon.responseheaders(flow)
+            asyncio.run(addon.response(flow))
+        self.assertEqual(flow.response.status_code, 200)
 
         flow = Mock(request=http.Request.make("GET", "https://yandex.ru/search/?text=Denied+phrase"),
                     response=None)

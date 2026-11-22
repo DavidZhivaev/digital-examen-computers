@@ -1,5 +1,6 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import html
 import json
 import re
 
@@ -32,6 +33,12 @@ WIKI_AI_TOPIC = re.compile(
     r"|нейронн\w+ сет\w*|neural networks?|chatgpt|large language models?|больш\w+ языков\w+ модел\w*",
     re.IGNORECASE,
 )
+GAMES_TITLE = re.compile(
+    r"играть онлайн|онлайн[- ]игры|игры онлайн|бесплатные игры"
+    r"|(?:play|free) (?:free )?online games|play games online",
+    re.IGNORECASE,
+)
+VIDEO_GAME_MARKUP = re.compile(br'"@type"\s*:\s*"VideoGame"', re.IGNORECASE)
 HTML_TITLE = re.compile(br"<title\b[^>]*>([^<]{1,4096})</title\s*>", re.IGNORECASE)
 GROUP_CONFIG_PATH = re.compile(r"/api/computers/groups(?:/[0-9]+(?:/save)?)?/?$")
 
@@ -187,11 +194,25 @@ def request(flow):
             request.path = path
 
 
-def checks_wiki_title(flow, rules):
+def page_topics(flow, rules):
+    if flow.response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "text/html":
+        return False, False
     host = inspection.host_name(flow.request.host)
-    return ((host == "wikipedia.org" or host.endswith(".wikipedia.org"))
-            and flow.response.headers.get("content-type", "").split(";", 1)[0].strip().lower() == "text/html"
-            and any(rule.get("ai_auto") for rule in rules))
+    wiki_ai = ((host == "wikipedia.org" or host.endswith(".wikipedia.org"))
+               and any(rule.get("ai_auto") for rule in rules))
+    games = any(rule.get("name", "").strip().casefold() == "игры" for rule in rules)
+    return wiki_ai, games
+
+
+def topic_denied(flow, rules):
+    wiki_ai, games = page_topics(flow, rules)
+    if not (wiki_ai or games):
+        return False
+    body = text_body(flow.response)
+    match = HTML_TITLE.search(body)
+    title = html.unescape(match.group(1).decode("utf-8", "replace")) if match else ""
+    return bool((wiki_ai and WIKI_AI_TOPIC.search(title))
+                or (games and (GAMES_TITLE.search(title) or VIDEO_GAME_MARKUP.search(body))))
 
 
 def responseheaders(flow):
@@ -209,7 +230,7 @@ def responseheaders(flow):
                          and any(rule.get("ai_auto") for rule in rules) and ai_url(target))):
             block_response_headers(flow)
             return
-    if not inspection.content_terms(rules) and not checks_wiki_title(flow, rules):
+    if not inspection.content_terms(rules) and not any(page_topics(flow, rules)):
         if not yandex_html(flow) or before.stream or not small_yandex_page(before):
             before.stream = True
             stream_yandex_style(flow)
@@ -262,11 +283,9 @@ async def response(flow):
     rules = inspection.groups.get()
     if not before.stream and scans_content(flow.request, rules):
         if before.raw_content and scan_limit(before):
-            if checks_wiki_title(flow, rules):
-                match = HTML_TITLE.search(text_body(before))
-                if match and WIKI_AI_TOPIC.search(inspection.html.unescape(match.group(1).decode("utf-8", "replace"))):
-                    flow.response = blocked()
-                    return
+            if topic_denied(flow, rules):
+                flow.response = blocked()
+                return
             if inspection.content_terms(rules):
                 await scan_buffered_response(flow, rules)
         if flow.response is before and yandex_html(flow) and before.raw_content:
