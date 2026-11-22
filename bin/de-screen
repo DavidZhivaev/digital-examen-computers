@@ -366,8 +366,7 @@ def screen_enabled():
 class Senders:
 
     def __init__(self):
-        self.interval = 0
-        self.last_reply = 0.0
+        self.watch = (0, 0.0)
         self.live_frame = None
         self.live_ready = threading.Condition()
         self.archive_ready = threading.Event()
@@ -385,8 +384,7 @@ class Senders:
 
     def post(self, connection, body):
         answer = connection.post(body)
-        self.interval = int(answer.get("interval", 0))
-        self.last_reply = time.monotonic()
+        self.watch = (int(answer.get("interval", 0)), time.monotonic())
 
     def live_loop(self):
         connection = FrameConnection(1.5)
@@ -488,6 +486,7 @@ def main():
     misses = 0
 
     scale_worker = None
+    previous_mode = 0
     while True:
         started = time.monotonic()
         if not screen_enabled():
@@ -495,11 +494,11 @@ def main():
             last_key = ""
             time.sleep(1)
             continue
-        local_mode = read_mode()
-        remote_mode = senders.interval if started - senders.last_reply < 6 else 0
-        watched = local_mode or remote_mode
-        if not watched:
+        remote_mode, received_at = senders.watch
+        watched = remote_mode if started - received_at < 6 else read_mode()
+        if watched != previous_mode:
             next_live = 0.0
+            previous_mode = watched
         live_due = bool(watched and started >= next_live)
         store_due = started >= next_store
         archive_near_live = bool(watched and not live_due and next_live - started < .9)
