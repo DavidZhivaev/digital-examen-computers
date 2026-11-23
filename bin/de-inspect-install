@@ -2,6 +2,7 @@
 set -eu
 
 requirements=$1
+wheels="$(dirname -- "$requirements")/inspection-wheels"
 runtime=/opt/de-inspect
 python=/usr/bin/python3.8
 
@@ -12,7 +13,7 @@ fi
 if ! cmp -s "$requirements" "$runtime/requirements.installed" || [ ! -x "$runtime/bin/mitmdump" ]; then
     "$python" -m venv "$runtime"
     "$runtime/bin/python" -m pip --isolated --disable-pip-version-check install \
-        --index-url https://pypi.org/simple -r "$requirements"
+        --no-index --only-binary=:all: --find-links "$wheels" -r "$requirements"
     "$runtime/bin/python" -m pip check
     "$runtime/bin/mitmdump" --version
     install -m 0644 "$requirements" "$runtime/requirements.installed"
