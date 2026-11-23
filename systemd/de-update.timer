@@ -3,7 +3,7 @@ Description=Digital Examen проверка обновлений
 
 [Timer]
 OnBootSec=20s
-OnUnitActiveSec=5min
+OnUnitInactiveSec=45s
 AccuracySec=1s
 Persistent=true
 
