@@ -120,9 +120,12 @@ def safe_name(value):
     return out
 
 
-def login_dir(computer, login, stamp):
+def login_dir(computer, login, stamp, session=False):
     day = time.strftime("%Y-%m-%d", time.localtime(stamp))
-    return os.path.join(DATA_DIR, day, safe_name(computer), safe_name(login) or "unknown")
+    name = safe_name(login) or "unknown"
+    if session:
+        name = "%s@%d" % (name, stamp)
+    return os.path.join(DATA_DIR, day, safe_name(computer), name)
 
 
 def note_seen(computer):
@@ -162,7 +165,11 @@ def store_frame(header, blobs):
     if not computer:
         return 0
 
-    folder = login_dir(computer, login, header["time"])
+    stamp = header["time"]
+    session_start = header.get("session_start")
+    is_session = type(session_start) is int and 0 < session_start <= stamp
+    started = session_start if is_session else stamp
+    folder = login_dir(computer, login, started, session=is_session)
     path = os.path.join(folder, "%010d" % header["frame"])
     os.makedirs(path, exist_ok=True)
 
@@ -197,16 +204,16 @@ def store_frame(header, blobs):
 
     with open(os.path.join(folder, ".record.lock"), "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        note_record(folder, header, written)
+        note_record(folder, header, started, written)
     return written
 
 
-def note_record(folder, header, written):
+def note_record(folder, header, started, written):
     path = os.path.join(folder, "record.json")
     record = {
         "computer": safe_name(header.get("computer", "")),
         "login": header.get("login", ""),
-        "started": header["time"],
+        "started": started,
         "last": header["time"],
         "frames": 0,
         "bytes": 0,
@@ -587,11 +594,15 @@ def find_record(computer, record_id, query):
         started = int(query.get("started", ["0"])[0])
         login = query.get("login", [""])[0]
         if started > 0:
-            folder = login_dir(computer, login, started)
-            with open(os.path.join(folder, "record.json")) as source:
-                record = json.load(source)
-            if record.get("started") == started and (record.get("login") or "") == login:
-                return folder
+            for session in (True, False):
+                folder = login_dir(computer, login, started, session=session)
+                try:
+                    with open(os.path.join(folder, "record.json")) as source:
+                        record = json.load(source)
+                except (OSError, ValueError):
+                    continue
+                if record.get("started") == started and (record.get("login") or "") == login:
+                    return folder
     except (OSError, ValueError, OverflowError):
         pass
 
@@ -631,11 +642,12 @@ def watched_interval(computer):
         return active_watch(safe_name(computer), time.monotonic())
 
 
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(LIVE_DIR, exist_ok=True)
-os.makedirs(STATE_DIR, exist_ok=True)
 class ReceiverServer(ThreadingHTTPServer):
     request_queue_size = 128
 
 
-ReceiverServer(("0.0.0.0", PORT), Handler).serve_forever()
+if __name__ == "__main__":
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(LIVE_DIR, exist_ok=True)
+    os.makedirs(STATE_DIR, exist_ok=True)
+    ReceiverServer(("0.0.0.0", PORT), Handler).serve_forever()
