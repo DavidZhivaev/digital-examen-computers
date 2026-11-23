@@ -41,6 +41,7 @@ PEOPLE_EVERY = 10
 TOLD = {}
 AI_CACHE = {}
 AI_PENDING = set()
+TRUSTED_ADDRESSES = {}
 AI_WORKERS = ThreadPoolExecutor(max_workers=2)
 AI_HOSTS = de_patterns.read_list(os.path.join(
     de_common.setting("DE_REPO_DIR", "/opt/digital-examen-computers"),
@@ -354,7 +355,7 @@ def read_hello(client):
             break
         data += chunk
         if data[:1] == b"\x16":
-            if len(data) >= 5 and len(data) >= 5 + struct.unpack("!H", data[3:5])[0]:
+            if client_hello(data) is not None:
                 break
         elif b"\r\n\r\n" in data:
             break
@@ -363,11 +364,32 @@ def read_hello(client):
     return data
 
 
+def client_hello(data):
+    message = bytearray()
+    offset = 0
+    while offset + 5 <= len(data):
+        if data[offset] != 0x16:
+            return b""
+        start = offset + 5
+        offset = start + int.from_bytes(data[start - 2:start], "big")
+        if offset > len(data):
+            return None
+        message.extend(data[start:offset])
+        if len(message) >= 4:
+            if message[0] != 1:
+                return b""
+            end = 4 + int.from_bytes(message[1:4], "big")
+            if len(message) >= end:
+                return bytes(message[:end])
+    return None
+
+
 def sni_of(data):
+    data = client_hello(data)
+    if not data:
+        return ""
     try:
-        if data[0] != 0x16 or data[5] != 0x01:
-            return ""
-        place = 9 + 2 + 32
+        place = 4 + 2 + 32
         place += 1 + data[place]
         place += 2 + struct.unpack("!H", data[place:place + 2])[0]
         place += 1 + data[place]
@@ -446,23 +468,54 @@ def proxy_target(data):
     return address.hostname, port, payload, tunnel
 
 
-def connect_web(host, port, public_only, timeout=10):
-    for family, kind, protocol, _, address in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+def connect_web(host, port, public_only, timeout=10, preferred=None):
+    key = (host, port)
+    trusted = de_inspection.permanent_allow(host)
+    cached = TRUSTED_ADDRESSES.get(key) if trusted else None
+    if cached and time.monotonic() < cached[0]:
+        addresses = cached[1]
+    else:
+        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        if trusted:
+            if len(TRUSTED_ADDRESSES) >= 128:
+                TRUSTED_ADDRESSES.clear()
+            TRUSTED_ADDRESSES[key] = (time.monotonic() + 30, addresses)
+    if preferred:
+        addresses = sorted(addresses, key=lambda entry: entry[4][0] != preferred)
+    deadline = time.monotonic() + timeout
+    for family, kind, protocol, _, address in addresses:
         if public_only and not ipaddress.ip_address(address[0]).is_global:
             continue
+        remaining = deadline - time.monotonic()
+        if trusted and remaining <= 0:
+            break
         upstream = socket.socket(family, kind, protocol)
         try:
-            upstream.settimeout(timeout)
+            upstream.settimeout(min(2, remaining) if trusted else timeout)
             upstream.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, RELAY_MARK)
             upstream.connect(address)
             return upstream
         except OSError:
             upstream.close()
+    if trusted:
+        TRUSTED_ADDRESSES.pop(key, None)
     raise OSError("сайт недоступен")
 
 
 def inspect_http(client, upstream, data, host, port):
     payload, remaining = de_upstream.http_request(data, host, port)
+    if de_inspection.permanent_allow(host):
+        first, separator, rest = payload.partition(b"\r\n")
+        method, target, version = first.split()
+        path = target[len(b"http://" + de_upstream.authority(host, port).encode("ascii")):]
+        client.settimeout(None)
+        upstream.settimeout(None)
+        upstream.sendall(b" ".join((method, path, version)) + separator + rest)
+        sender = threading.Thread(target=de_upstream.send_body, args=(client, upstream, remaining), daemon=True)
+        sender.start()
+        pipe(upstream, client)
+        sender.join(timeout=5)
+        return False
     if remaining + len(payload) > de_inspection.MAX_BODY:
         raise ValueError("слишком большой запрос")
     head, pending = payload.split(b"\r\n\r\n", 1)
@@ -590,8 +643,9 @@ class Handler(socketserver.BaseRequestHandler):
                 pass
             return
 
-        verdict, group = decide(host)
-        inspect_tls = port == 443 and not de_inspection.permanent_allow(host)
+        trusted = de_inspection.permanent_allow(host)
+        verdict, group = ("pass", "") if trusted else decide(host)
+        inspect_tls = port == 443 and not trusted
         if verdict != "pass" and not inspect_tls and (
                 verdict == "ai_block" or port != 80 or group not in {rule.get("name") for rule in de_inspection.groups.get()
                                             if rule.get("url_allow")}):
@@ -625,8 +679,10 @@ class Handler(socketserver.BaseRequestHandler):
                 except OSError:
                     upstream.close()
                     raise
+            elif trusted:
+                upstream = connect_web(host, port, proxy is not None, timeout=5, preferred=ip)
             else:
-                upstream = connect_web(ip, port, proxy is not None)
+                upstream = connect_web(host if secure and port == 443 else ip, port, proxy is not None)
         except OSError:
             return
         if port == 80:

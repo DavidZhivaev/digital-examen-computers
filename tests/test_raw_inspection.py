@@ -8,6 +8,7 @@ import json
 import base64
 import gzip
 import socket
+import ssl
 import sys
 import tempfile
 import unittest
@@ -182,6 +183,50 @@ class RawInspectionTests(unittest.TestCase):
                 now.return_value = 86501
                 self.assertFalse(de_learned.blocked(url, ("test",)))
         self.assertEqual(de_learned.endpoint("https://yandex.ru/search/?text=test"), "")
+
+    def test_tls_hello_split_across_records(self):
+        output = ssl.MemoryBIO()
+        client = ssl.create_default_context().wrap_bio(ssl.MemoryBIO(), output, server_hostname="sdo.1580.ru")
+        with self.assertRaises(ssl.SSLWantReadError):
+            client.do_handshake()
+        hello = output.read()
+        first = hello[:3] + (32).to_bytes(2, "big") + hello[5:37]
+        second = hello[:3] + (len(hello) - 37).to_bytes(2, "big") + hello[37:]
+        sock = Mock()
+        sock.recv.side_effect = [first, second]
+        data = relay.read_hello(sock)
+        self.assertEqual(data, first + second)
+        self.assertEqual(relay.sni_of(data), "sdo.1580.ru")
+
+    def test_exempt_tls_routes_by_server_name(self):
+        handler = relay.Handler.__new__(relay.Handler)
+        handler.client_address = ("127.0.0.1", 39000)
+        handler.request = Mock()
+        hello = b"\x16"
+        with patch.object(relay, "owner_of", return_value="student"), \
+                patch.object(relay, "read_hello", return_value=hello), \
+                patch.object(relay, "sni_of", return_value="sdo.1580.ru"), \
+                patch.object(relay, "original_target", return_value=("192.0.2.10", 443)), \
+                patch.object(relay, "decide", return_value=("pass", "")), \
+                patch.object(relay, "connect_web", side_effect=OSError) as connect:
+            handler.handle()
+        connect.assert_called_once_with("sdo.1580.ru", 443, False, timeout=5, preferred="192.0.2.10")
+
+    def test_trusted_connection_only_uses_addresses_resolved_for_its_name(self):
+        addresses = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.11", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.12", 443)),
+        ]
+        with patch.dict(relay.TRUSTED_ADDRESSES, clear=True), \
+                patch.object(socket, "getaddrinfo", return_value=addresses) as resolve, \
+                patch.object(socket, "socket") as create:
+            relay.connect_web("sdo.1580.ru", 443, False, preferred="192.0.2.10")
+            relay.connect_web("sdo.1580.ru", 443, False, preferred="192.0.2.12")
+        resolve.assert_called_once_with("sdo.1580.ru", 443, type=socket.SOCK_STREAM)
+        self.assertEqual(
+            [args[0][0] for args in create.return_value.connect.call_args_list],
+            [("192.0.2.11", 443), ("192.0.2.12", 443)],
+        )
 
     def test_origin_transport_accepts_only_the_inspector_side(self):
         handler = relay.InspectionOrigin.__new__(relay.InspectionOrigin)
