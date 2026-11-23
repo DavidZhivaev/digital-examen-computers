@@ -34,7 +34,7 @@ services:
     environment:
       DE_API_URL: "${DE_SITE_INTERNAL_URL:-http://de-prod-api:8000}"
       DE_NOTIFY_URL: "http://de-alerts:8099/notify"
-      DE_SCREEN_LIMIT_GB: "900"
+      DE_SCREEN_LIMIT_GB: "1900"
       DE_SCREEN_MIN_FREE_GB: "50"
     networks:
       - de-edge
