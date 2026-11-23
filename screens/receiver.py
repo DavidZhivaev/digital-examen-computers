@@ -3,6 +3,7 @@
 import fcntl
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -598,7 +599,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(500, {"error": "не удалось склеить запись"})
                 return
             with open(target, "rb") as video:
-                self.send_blob(video.read(), "video/webm")
+                self.send_response(200)
+                self.send_header("Content-Type", "video/webm")
+                self.send_header("Content-Length", str(os.fstat(video.fileno()).st_size))
+                self.end_headers()
+                shutil.copyfileobj(video, self.wfile, length=256 * 1024)
 
 
 def find_record(computer, record_id, query):

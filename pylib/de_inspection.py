@@ -17,7 +17,7 @@ ORIGIN_PORT = 3140
 BLOCK_PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'; base-uri 'none'"
 MAX_BODY = 131072
 RUN = Path("/run/digital-examen")
-PERMANENT_ALLOW = ("*.1580.ru", "*.silvertests.ru")
+PERMANENT_ALLOW = ("*.1580.ru", "*.silvertests.ru", "217.107.34.59")
 
 
 def host_name(value):
@@ -57,6 +57,17 @@ def load_groups(text):
         if rule.get("principle") == "allow":
             return PolicyGroups(ordered[:index + 1], ordered)
     return PolicyGroups(ordered, ordered)
+
+
+direct_sites = CachedFile(Path("/etc/digital-examen/direct-sites.txt"), str.splitlines, ())
+error_html = CachedFile(Path("/etc/digital-examen/error.html"), str.encode, b"")
+
+
+def error_page(host, status, content_type):
+    media_type = content_type.partition(";")[0].strip().lower()
+    if 500 <= status < 600 and media_type in ("text/html", "application/xhtml+xml") and not permanent_allow(host):
+        return error_html.get()
+    return b""
 
 
 groups = CachedFile(POLICY_FILE, load_groups, [])
@@ -178,7 +189,10 @@ def search_return_url(host, target):
 
 
 def permanent_allow(host):
-    return any(de_patterns.host_matches(pattern, host) for pattern in PERMANENT_ALLOW)
+    return any(
+        de_patterns.matches(pattern, host)
+        for pattern in (*PERMANENT_ALLOW, *direct_sites.get())
+    )
 
 
 def host_allowed(host, rules):

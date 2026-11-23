@@ -32,7 +32,9 @@ sh "$here/bin/de-deps"
 sh "$here/bin/de-inspect-install" "$here/config/inspection-requirements.txt"
 install -d -m 0755 /etc/digital-examen /usr/local/lib/digital-examen
 install -d -m 0700 "$state" "$state/screen-queue"
-install -m 0644 "$here/config/block.html" /etc/digital-examen/block.html
+for asset in block.html error.html direct-sites.txt; do
+    install -m 0644 "$here/config/$asset" "/etc/digital-examen/$asset"
+done
 manifest=$(mktemp "$state/.installed-files.XXXXXX")
 trap 'unlink "$manifest" 2>/dev/null || true' EXIT
 put() {

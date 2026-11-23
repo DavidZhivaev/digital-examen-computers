@@ -246,6 +246,17 @@ def topic_denied(flow, rules):
 
 def responseheaders(flow):
     before = flow.response
+    page = inspection.error_page(flow.request.host, before.status_code, before.headers.get("content-type", ""))
+    if page:
+        response = http.Response.make(before.status_code, page, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": inspection.BLOCK_PAGE_CSP,
+        })
+        chunks = iter(([page],) if flow.request.method != "HEAD" else ())
+        response.stream = lambda _: next(chunks, [])
+        flow.response = response
+        return
     rules = inspection.groups.get()
     if not scans_content(flow.request, rules):
         before.stream = True

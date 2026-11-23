@@ -556,6 +556,14 @@ def inspect_http(client, upstream, data, host, port):
     upstream.sendall(request)
     with http.client.HTTPResponse(upstream, method=method.decode("ascii")) as reply:
         reply.begin()
+        page = de_inspection.error_page(host, reply.status, reply.headers.get("Content-Type", ""))
+        if page:
+            head = (f"HTTP/1.1 {reply.status} Server Error\r\n"
+                    "Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n"
+                    f"Content-Security-Policy: {de_inspection.BLOCK_PAGE_CSP}\r\n"
+                    f"Content-Length: {len(page)}\r\nConnection: close\r\n\r\n").encode("ascii")
+            client.sendall(head if method == b"HEAD" else head + page)
+            return False
         if reply.status == 101:
             raise ValueError("смена протокола не поддерживается")
         fields = reply.getheaders()

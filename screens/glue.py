@@ -38,7 +38,7 @@ def encode(target, size, rate, pictures):
         "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", "%dx%d" % size,
         "-framerate", "%.6f" % rate, "-i", "pipe:0",
         "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "36",
-        "-deadline", "realtime", "-cpu-used", "6", "-threads", "2",
+        "-deadline", "realtime", "-cpu-used", "8", "-row-mt", "1", "-threads", "2",
         "-pix_fmt", "yuv420p", target,
     ]
     with subprocess.Popen(command, stdin=subprocess.PIPE) as encoder:

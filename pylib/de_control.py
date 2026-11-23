@@ -34,10 +34,11 @@ class Control(socketserver.StreamRequestHandler):
                 host = de_common.setting("DE_API_URL").rstrip("/")
                 if urlsplit(host).scheme != "https":
                     raise ValueError("Вход оператора требует настроенный HTTPS-сайт")
-                request = Request(host + "/api/computers/cli/computers/" + de_common.computer())
+                hostname = socket.gethostname().split(".", 1)[0]
+                request = Request(host + "/api/computers/cli/computers/" + hostname)
                 request.add_unredirected_header("Authorization", "Bearer " + message["token"])
                 with urlopen(request, timeout=5) as answer:
-                    if json.load(answer).get("name") != de_common.computer():
+                    if json.load(answer).get("hostname") != hostname:
                         raise ValueError("Сайт не подтвердил этот компьютер")
                 de_lesson_activity.mark_privileged()
                 result = {"ok": True}
