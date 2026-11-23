@@ -6,6 +6,7 @@ repair=0
 install -d -m 0755 /run/digital-examen
 exec 9>/run/digital-examen/update.lock
 flock -n 9 || exit 0
+trap 'PYTHONPATH=/usr/local/lib/digital-examen /usr/bin/python3 -m de_integrity || true' EXIT
 
 for definition in "$repo"/systemd/de-*; do
     unit=${definition##*/}
