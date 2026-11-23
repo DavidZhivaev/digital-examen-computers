@@ -12,7 +12,7 @@ import de_upstream
 STATE = Path(de_common.RUN_DIR) / "tg-proxy"
 LOCK = threading.Lock()
 CONNECTIONS = weakref.WeakKeyDictionary()
-DOMAINS = ("telegram.org", "telegram.me", "t.me", "cdn-telegram.org", "telegra.ph")
+DOMAINS = ("telegram.org", "telegram.me", "telegram.dog", "t.me", "cdn-telegram.org", "telegra.ph", "telesco.pe")
 
 
 def matches(host):
