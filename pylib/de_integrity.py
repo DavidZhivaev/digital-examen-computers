@@ -21,6 +21,9 @@ def target_units(message, installed):
         return None, []
     if not words or Path(words[0]).name != "systemctl":
         return None, []
+    if any(word in {"--user", "--global", "-H", "--host", "-M", "--machine"}
+           or word.startswith(("--host=", "--machine=")) for word in words[1:]):
+        return None, []
     args = [word for word in words[1:] if not word.startswith("-")]
     if not args or args[0] not in ACTIONS:
         return None, []
