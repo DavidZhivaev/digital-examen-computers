@@ -16,6 +16,7 @@ EVENT = struct.Struct("@llHHi")
 LOCK = threading.Lock()
 start = None
 covered = requests = 0
+total_requests = None
 privileged = False
 privileged_at = 0
 sent = None
@@ -23,12 +24,13 @@ active = False
 
 
 def configure(lesson):
-    global start, covered, requests, privileged, sent
+    global start, covered, requests, total_requests, privileged, sent
     with LOCK:
         if lesson == start:
             return
         start = lesson
         covered = requests = 0
+        total_requests = None
         privileged = start is not None and start <= privileged_at < start + DURATION
         sent = None
         if start is None:
@@ -37,6 +39,7 @@ def configure(lesson):
             saved = json.loads(STATE.read_text())
             if saved["start"] == start:
                 covered, requests = int(saved["covered"], 16), saved["requests"]
+                total_requests = saved.get("total_requests")
                 privileged |= saved["privileged"]
         except (OSError, ValueError, KeyError, TypeError):
             pass
@@ -50,8 +53,8 @@ def mark_privileged():
             privileged = True
 
 
-def record(stamp, count=0):
-    global covered, requests
+def record(stamp, count=0, total=None):
+    global covered, requests, total_requests
     with LOCK:
         if start is None:
             return
@@ -59,7 +62,9 @@ def record(stamp, count=0):
         if not 0 <= offset < DURATION:
             return
         requests = min(2**31 - 1, requests + count)
-        if not count and active:
+        if total is not None:
+            total_requests = min(2**31 - 1, (total_requests or 0) + total)
+        if not count and total is None and active:
             length = min(30, DURATION - offset)
             covered |= ((1 << length) - 1) << offset
 
@@ -70,7 +75,7 @@ def save_state():
     try:
         temporary = STATE.with_suffix(".tmp")
         temporary.write_text(json.dumps({
-            "start": start, "covered": hex(covered), "requests": requests, "privileged": privileged,
+            "start": start, "covered": hex(covered), "requests": requests, "total_requests": total_requests, "privileged": privileged,
         }))
         temporary.replace(STATE)
     except OSError:
@@ -91,7 +96,10 @@ def snapshot(now):
             return None
         seconds = bin(covered & ((1 << elapsed) - 1)).count("1")
         save_state()
-        return {"start": start, "seconds": seconds, "requests": requests, "privileged": privileged}, elapsed
+        payload = {"start": start, "seconds": seconds, "requests": requests, "privileged": privileged}
+        if total_requests is not None:
+            payload["total_requests"] = total_requests
+        return payload, elapsed
 
 
 def acknowledged(report):

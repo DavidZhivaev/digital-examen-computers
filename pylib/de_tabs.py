@@ -67,6 +67,10 @@ def process(uid, data):
                 count = counts.get(str(stamp))
                 if type(count) is int and 0 < count <= 100000:
                     de_lesson_activity.record(stamp=stamp, count=count)
+                elif (isinstance(count, list) and len(count) == 2
+                      and all(type(item) is int for item in count)
+                      and 0 <= count[1] <= count[0] <= 100000):
+                    de_lesson_activity.record(stamp=stamp, count=count[1], total=count[0])
         PROFILES[profile] = (now, tabs)
         for token, success in (data.get("done") or {}).items():
             pending = PENDING.get(token)

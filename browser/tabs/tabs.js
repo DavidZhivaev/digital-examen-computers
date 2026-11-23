@@ -90,10 +90,14 @@ function checkRequest({ url }) {
 }
 
 let lessonRequests = {}
-api.webRequest.onBeforeRequest.addListener(() => {
+api.webRequest.onBeforeRequest.addListener(({ url }) => {
   const minute = Math.floor(Date.now() / 60000) * 60
-  lessonRequests[minute] = (lessonRequests[minute] || 0) + 1
-}, { urls: ['*://*.1580.ru/*', '*://*.silvertests.ru/*'] })
+  const hostname = new URL(url).hostname.replace(/\.$/, '')
+  const white = hostname.endsWith('.1580.ru') || hostname === 'silvertests.ru'
+  const counts = (lessonRequests[minute] ||= [0, 0])
+  counts[0] += 1
+  counts[1] += Number(white)
+}, { urls: ['http://*/*', 'https://*/*'] })
 
 function requestFilter(pattern) {
   const hint = pattern.match(/(?:[A-Za-z0-9]\/|\/(?=[A-Za-z0-9._~-]+\?))([A-Za-z0-9._~/?&=+-]+)/)

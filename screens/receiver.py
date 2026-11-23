@@ -491,7 +491,7 @@ class Handler(BaseHTTPRequestHandler):
             self.long_poll(query)
             return
 
-        command_level = parts[0] in ("watch", "power", "record", "shot")
+        command_level = parts[0] in ("watch", "power", "record", "shot", "lesson")
         if not self.allowed(command_level):
             self.reply(403, {"error": "bad secret"})
             return
@@ -544,6 +544,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_record(safe_name(parts[1]), parts[2], query)
             return
 
+        if parts[0] == "lesson" and len(parts) == 3 and parts[2].isascii() and parts[2].isdigit():
+            computer, start = safe_name(parts[1]), int(parts[2])
+            if computer and 0 < start <= time.time() - 2400:
+                self.send_video(["--lesson", DATA_DIR, computer, str(start)])
+                return
+
         self.reply(404, {"error": "unknown path"})
 
     def long_poll(self, query):
@@ -575,12 +581,18 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404, {"error": "no record"})
             return
 
+        self.send_video([folder])
+
+    def send_video(self, inputs):
         with tempfile.TemporaryDirectory(prefix="de-record-") as work:
             target = os.path.join(work, "video.webm")
             try:
-                code = subprocess.call([PYTHON, GLUE, folder, target], timeout=220)
+                code = subprocess.call([PYTHON, GLUE, *inputs, target], timeout=220)
             except subprocess.TimeoutExpired:
                 self.reply(504, {"error": "превышено время подготовки записи"})
+                return
+            if code == 4:
+                self.reply(404, {"error": "no frames"})
                 return
             if code != 0 or not os.path.isfile(target) or not os.path.getsize(target):
                 self.reply(500, {"error": "не удалось склеить запись"})
