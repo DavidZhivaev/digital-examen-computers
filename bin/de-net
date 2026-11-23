@@ -470,11 +470,12 @@ def proxy_target(data):
 
 
 def connect_web(host, port, public_only, timeout=10, preferred=None):
-    proxy = de_telegram.connect(host, port, RELAY_MARK, timeout)
-    if proxy is not None:
-        return proxy
-    key = (host, port)
     trusted = de_inspection.permanent_allow(host)
+    if not trusted:
+        proxy = de_telegram.connect(host, port, RELAY_MARK, timeout)
+        if proxy is not None:
+            return proxy
+    key = (host, port)
     cached = TRUSTED_ADDRESSES.get(key) if trusted else None
     if cached and time.monotonic() < cached[0]:
         addresses = cached[1]
@@ -703,7 +704,7 @@ class Handler(socketserver.BaseRequestHandler):
                 with upstream:
                     if inspect_http(client, upstream, data, host, port, trusted):
                         note_block(host, login, "Фильтр содержимого")
-                    else:
+                    elif not trusted:
                         note("site", host, login)
             except (OSError, ValueError, http.client.HTTPException):
                 pass
@@ -712,7 +713,8 @@ class Handler(socketserver.BaseRequestHandler):
             try:
                 if data:
                     upstream.sendall(data)
-                note("site", de_inspection.host_name(host), login)
+                if not trusted:
+                    note("site", de_inspection.host_name(host), login)
                 bridge(client, upstream)
             except OSError:
                 return
