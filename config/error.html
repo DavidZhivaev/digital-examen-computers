@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Доступ к сайту ограничен</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      min-height: 100dvh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: #f3f2f8;
+      color: #252631;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      text-align: center;
+    }
+    main { width: min(100%, 760px); }
+    svg { display: block; width: min(100%, 540px); height: auto; margin: 0 auto 26px; }
+    h1 { margin: 0 auto; max-width: 740px; font-size: clamp(21px, 3.5vw, 30px); font-weight: 700; line-height: 1.32; letter-spacing: -.35px; text-wrap: balance; }
+    @media (max-width: 480px) {
+      body { padding: 20px; }
+      svg { margin-bottom: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 540 330" aria-hidden="true" focusable="false">
+      <!-- Soft concentric background -->
+      <circle cx="270" cy="165" r="161" fill="#f9dfe3"/>
+      <circle cx="270" cy="165" r="143" fill="#f8d5da"/>
+      <circle cx="270" cy="165" r="115" fill="#f7cbd1"/>
+      <!-- Browser window -->
+      <rect x="135" y="220" width="270" height="24" rx="12" fill="#d6363c" opacity=".07"/>
+      <rect x="115" y="88" width="310" height="174" rx="12" fill="#fdfcfe" stroke="#ce3039" stroke-width="3.5"/>
+      <path d="M117 119h306" stroke="#e4e2eb" stroke-width="2.5"/>
+      <g fill="#f2545b">
+        <circle cx="132" cy="104" r="4.6"/><circle cx="146" cy="104" r="4.6"/><circle cx="160" cy="104" r="4.6"/>
+      </g>
+      <g fill="#e6e6ed">
+        <rect x="130" y="132" width="231" height="16" rx="2"/>
+        <rect x="130" y="155" width="104" height="87" rx="2"/>
+        <rect x="244" y="155" width="164" height="8" rx="2"/>
+        <rect x="244" y="170" width="150" height="8" rx="2"/>
+        <rect x="244" y="185" width="158" height="8" rx="2"/>
+        <rect x="244" y="200" width="126" height="8" rx="2"/>
+        <rect x="244" y="215" width="164" height="8" rx="2"/>
+        <rect x="244" y="230" width="140" height="8" rx="2"/>
+      </g>
+      <path d="m180 170-16 31 16-4-6 24 25-34-17 4 8-21z" fill="#fff" opacity=".9"/>
+      <!-- No-entry sign -->
+      <circle cx="270" cy="177" r="51" fill="#cf3038"/>
+      <circle cx="270" cy="177" r="44" fill="#ff5158"/>
+      <rect x="246" y="171" width="48" height="12" rx="1.5" fill="#fff"/>
+      <!-- Warning triangles -->
+      <g transform="translate(365 39) rotate(14)">
+        <path d="M-4 0Q0-7 4 0L22 32Q26 39 18 39H-18Q-26 39-22 32Z" fill="#dc333b"/>
+        <path d="M0 10v12" stroke="#fff" stroke-width="5" stroke-linecap="round"/><circle cy="30" r="2.8" fill="#fff"/>
+      </g>
+      <g transform="translate(165 264) rotate(-15)">
+        <path d="M-4 0Q0-7 4 0L19 28Q23 34 16 34H-16Q-23 34-19 28Z" fill="#f4545b"/>
+        <path d="M0 9v10" stroke="#fff" stroke-width="4.5" stroke-linecap="round"/><circle cy="26" r="2.5" fill="#fff"/>
+      </g>
+      <!-- Lock -->
+      <g transform="translate(390 253) rotate(17)">
+        <path d="M-10-4v-8a10 10 0 0 1 20 0v8" fill="none" stroke="#ce3039" stroke-width="6"/>
+        <rect x="-19" y="-5" width="38" height="35" rx="9" fill="#ff5158"/>
+        <circle cy="8" r="5" fill="#fff"/>
+        <path d="M-2 9h4l2 11h-8z" fill="#fff"/>
+      </g>
+      <g stroke="#f4545b" stroke-width="4" stroke-linecap="round" fill="none">
+        <path d="m132 65-10-9m21 1-5-13m-13 32-13-5"/>
+      </g>
+    </svg>
+    <h1>Школьный компьютер слишком современный для соединения с этим сайтом</h1>
+  </main>
+</body>
+</html>
