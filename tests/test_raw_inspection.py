@@ -63,13 +63,13 @@ class RawInspectionTests(unittest.TestCase):
             state = Path(directory)
             with patch.object(de_control, "RUN", state), \
                     patch.object(de_common, "setting", return_value="https://example.org"), \
-                    patch.object(de_common, "computer", return_value="5k-100-1"), \
+                    patch.object(de_control.socket, "gethostname", return_value="m1580-5-100-1"), \
                     patch.object(de_control, "urlopen") as check:
                 check.side_effect = OSError("site unavailable")
                 self.assertIn("error", invoke("off"))
                 self.assertFalse((state / "block-off").exists())
                 check.side_effect = None
-                check.return_value.__enter__.side_effect = lambda: io.BytesIO(b'{"name":"5k-100-1"}')
+                check.return_value.__enter__.side_effect = lambda: io.BytesIO(b'{"hostname":"m1580-5-100-1"}')
                 self.assertEqual(invoke("off"), {"mode": "off"})
                 self.assertTrue((state / "block-off").exists())
                 self.assertEqual(invoke("on"), {"mode": "on"})
