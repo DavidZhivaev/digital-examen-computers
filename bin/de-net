@@ -27,6 +27,7 @@ import de_common
 import de_patterns
 import de_inspection
 import de_upstream
+import de_telegram
 
 PROXY_PORT = 3129
 DNS_PORT = 5399
@@ -469,6 +470,9 @@ def proxy_target(data):
 
 
 def connect_web(host, port, public_only, timeout=10, preferred=None):
+    proxy = de_telegram.connect(host, port, RELAY_MARK, timeout)
+    if proxy is not None:
+        return proxy
     key = (host, port)
     trusted = de_inspection.permanent_allow(host)
     cached = TRUSTED_ADDRESSES.get(key) if trusted else None
@@ -691,7 +695,7 @@ class Handler(socketserver.BaseRequestHandler):
             elif trusted:
                 upstream = connect_web(ip if trusted_destination else host, port, proxy is not None, timeout=5, preferred=ip)
             else:
-                upstream = connect_web(host if secure and port == 443 else ip, port, proxy is not None)
+                upstream = connect_web(host if (secure and port == 443) or de_telegram.matches(host) else ip, port, proxy is not None)
         except OSError:
             return
         if port == 80:
@@ -868,6 +872,7 @@ def main():
     threading.Thread(target=people_loop, daemon=True).start()
     threading.Thread(target=stop_games, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
+    threading.Thread(target=de_telegram.close_expired, daemon=True).start()
     notification = os.environ.get("NOTIFY_SOCKET")
     if notification:
         if notification.startswith("@"):
