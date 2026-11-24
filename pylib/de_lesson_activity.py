@@ -91,8 +91,9 @@ def snapshot(now):
     with LOCK:
         if start is None:
             return None
-        elapsed = min(DURATION, (int(now) - start - 3) // 60 * 60)
-        if elapsed < 0 or sent == (start, elapsed):
+        elapsed = DURATION if now >= start + DURATION else (int(now) - start - 3) // 60 * 60
+        measured = total_requests is not None
+        if elapsed < 0 or sent == (start, elapsed, measured):
             return None
         seconds = bin(covered & ((1 << elapsed) - 1)).count("1")
         save_state()
@@ -106,7 +107,7 @@ def acknowledged(report):
     global sent
     payload, elapsed = report
     with LOCK:
-        sent = (payload["start"], elapsed)
+        sent = (payload["start"], elapsed, "total_requests" in payload)
 
 
 def listen():
