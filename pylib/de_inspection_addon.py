@@ -165,6 +165,13 @@ def request(flow):
             or inspection.host_name(request.pretty_host) != inspection.host_name(request.host)):
         flow.response = blocked()
         return
+    if (inspection.host_name(request.host) == "vk.com"
+            and request.path.partition("?")[0] == "/js/api/openapi.js"):
+        flow.response = http.Response.make(403, b"", {
+            "Content-Type": "application/javascript",
+            "Cache-Control": "no-store",
+        })
+        return
     rules = inspection.groups.get()
     if not rules or (inspection.RUN / "block-off").exists() or inspection.host_allowed(request.host, rules):
         return
