@@ -33,6 +33,7 @@ PROXY_PORT = 3129
 DNS_PORT = 5399
 TABLE = "de_agent"
 RELAY_MARK = 0x44450000
+DIRECT_WEB_IP = "217.107.34.59"
 SCHOOL_PROXY_MARK = 0x44450001
 RELAY_RULE = ["pref", "8999", "fwmark", hex(RELAY_MARK) + "/0xffffffff", "lookup", "main"]
 TRAFFIC_SOCKET = os.path.join(de_common.RUN_DIR, "traffic.sock")
@@ -96,8 +97,13 @@ table inet %(table)s {
         type uid
         %(users)s
     }
+    chain direct_web_out {
+        type route hook output priority mangle; policy accept;
+        meta skuid @people ip daddr %(direct_web_ip)s tcp dport { 80, 443 } meta mark set %(relay_mark)s
+    }
     chain nat_out {
         type nat hook output priority -100; policy accept;
+        meta skuid @people ip daddr %(direct_web_ip)s tcp dport { 80, 443 } return
         %(vpn_nat)s
         meta skuid @people ip daddr != 127.0.0.0/8 tcp dport { 80, 443 } redirect to :%(proxy)d
         meta skuid @people ip6 daddr != ::1 tcp dport { 80, 443 } redirect to :%(proxy)d
@@ -113,6 +119,7 @@ table inet %(table)s {
         ip6 daddr ::1 udp dport %(dns)d accept
         tcp dport { %(inspect)d, %(origin)d } reject with tcp reset
         %(vpn_filter)s
+        ip daddr %(direct_web_ip)s tcp dport { 80, 443 } accept
         oifname "lo" accept
         meta l4proto tcp reject with tcp reset
         reject
@@ -120,7 +127,8 @@ table inet %(table)s {
 }
 """ % {"table": TABLE, "proxy": PROXY_PORT, "dns": DNS_PORT,
         "inspect": de_inspection.LISTEN_PORT, "origin": de_inspection.ORIGIN_PORT, "users": users,
-        "vpn_nat": vpn_nat, "vpn_filter": vpn_filter})
+        "vpn_nat": vpn_nat, "vpn_filter": vpn_filter,
+        "direct_web_ip": DIRECT_WEB_IP, "relay_mark": hex(RELAY_MARK)})
     if ok:
         VPN_ENABLED = vpn_enabled
     EXPECTED_RULES = installed_rules() if ok else None
@@ -141,6 +149,9 @@ def relay_exception(enable):
             ["-d", loopback, "-p", "tcp", "--dport", str(PROXY_PORT)],
             ["-d", loopback, "-p", "udp", "--dport", str(DNS_PORT)],
         ]
+        if tool == "iptables":
+            rules.append(["-d", DIRECT_WEB_IP, "-m", "mark", "--mark", hex(RELAY_MARK),
+                          "-p", "tcp", "-m", "multiport", "--dports", "80,443"])
         if inspection_gid is not None:
             rules.append(["-m", "owner", "--gid-owner", str(inspection_gid), "-p", "tcp", "--dport", "443"])
         prefix = [tool, "-w", "2"]
