@@ -55,6 +55,7 @@ AI_HOSTS = de_patterns.read_list(os.path.join(
 ))
 LOCK = threading.Lock()
 PEOPLE = set()
+RELAY_CLIENTS = set()
 EXPECTED_RULES = None
 VPN_ENABLED = False
 
@@ -182,9 +183,33 @@ def relay_route(enable):
 
 
 def rules_down():
+    direct_routes(set())
     relay_route(False)
     subprocess.call(["nft", "delete", "table", "inet", TABLE],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def direct_routes(users):
+    wanted = {(family, uid) for family in ("-4", "-6") for uid in users}
+    actual = set()
+    for family in ("-4", "-6"):
+        result = subprocess.run(["ip", "-N", family, "rule", "show"], capture_output=True, text=True)
+        if result.returncode:
+            return False
+        for line in result.stdout.splitlines():
+            match = re.fullmatch(r"8997:\s+from all uidrange (\d+)-\1 lookup (?:main|254) proto(?:col)? 158", line.strip())
+            if match:
+                actual.add((family, int(match[1])))
+    for family, uid in actual ^ wanted:
+        add = (family, uid) in wanted
+        args = ["ip", family, "rule", "add" if add else "del",
+                "pref", "8997", "uidrange", f"{uid}-{uid}", "lookup", "main", "protocol", "158"]
+        if subprocess.call(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
+            if add:
+                actual.add((family, uid))
+            else:
+                actual.discard((family, uid))
+    return actual == wanted
 
 
 def inspector_ready():
@@ -197,7 +222,10 @@ def inspector_ready():
 
 def update_people():
     global PEOPLE, EXPECTED_RULES
-    enabled = (de_inspection.groups.get() and not (de_inspection.RUN / "block-off").exists()
+    groups = de_inspection.groups.get()
+    if not direct_routes({entry.pw_uid for entry in de_common.people()} if not groups else set()):
+        log("не удалось обновить прямые маршруты")
+    enabled = (groups and not (de_inspection.RUN / "block-off").exists()
                and inspector_ready())
     current = {entry.pw_uid for entry in de_common.people()} if enabled else set()
     if current == PEOPLE:
@@ -207,7 +235,15 @@ def update_people():
         script += "add element inet %s people { %s }\n" % (TABLE, ", ".join(map(str, sorted(current))))
     if not nft(script):
         return False
+    closing = not groups and bool(PEOPLE)
     PEOPLE = current
+    if closing:
+        with LOCK:
+            for client in RELAY_CLIENTS:
+                try:
+                    client.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
     EXPECTED_RULES = installed_rules()
     log("ограничения действуют для UID: " + (", ".join(map(str, sorted(current))) or "никого"))
     return True
@@ -624,6 +660,14 @@ def inspect_http(client, upstream, data, host, port, trusted=False):
 
 
 class Handler(socketserver.BaseRequestHandler):
+
+    def setup(self):
+        with LOCK:
+            RELAY_CLIENTS.add(self.request)
+
+    def finish(self):
+        with LOCK:
+            RELAY_CLIENTS.discard(self.request)
 
     def handle(self):
         client = self.request

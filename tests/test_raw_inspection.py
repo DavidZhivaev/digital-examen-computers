@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
@@ -91,9 +92,12 @@ class RawInspectionTests(unittest.TestCase):
 
     def test_no_restriction_groups_means_no_redirected_users(self):
         with patch.object(de_inspection.groups, "get", return_value=[]), patch.object(relay, "PEOPLE", {509}), \
+                patch.object(relay.de_common, "people", return_value=[SimpleNamespace(pw_uid=509)]), \
+                patch.object(relay, "direct_routes", return_value=True) as direct, \
                 patch.object(relay, "nft", return_value=True) as nft, patch.object(relay, "installed_rules"):
             self.assertTrue(relay.update_people())
             self.assertEqual(relay.PEOPLE, set())
+            direct.assert_called_once_with({509})
             nft.assert_called_once_with("flush set inet de_agent people\n")
 
     def test_group_priorities_and_blacklist_union(self):
