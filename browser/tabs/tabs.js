@@ -14,6 +14,7 @@ let port
 let timer
 let busy = false
 let schoolSession = false
+let tracking = false
 let firstReply = []
 
 let urlRevision = ''
@@ -52,6 +53,7 @@ function matchesList(url, { included, excluded }) {
 
 function allowedUrl(url) {
   const host = new URL(url).hostname.toLowerCase().replace(/\.$/, '')
+  if (/(^|\.)(1580\.ru|silvertests\.ru)$/.test(host)) return true
   const matchesHost = (pattern) => {
     if (pattern === '*') return true
     const tail = pattern.replace(/^\*?\./, '')
@@ -67,7 +69,7 @@ function allowedUrl(url) {
 function updateCosmeticCSS(tabId, url) {
   if (tabId == null || !/^https?:/.test(url ?? '')) return
   const host = new URL(url).hostname.toLowerCase().replace(/\.$/, '')
-  if (/(^|\.)1580\.ru$/.test(host)) return
+  if (/(^|\.)(1580\.ru|silvertests\.ru)$/.test(host)) return
   const details = { target: { tabId }, files: ['cosmetic.css'], origin: 'USER' }
   const action = adblocker ? 'insertCSS' : 'removeCSS'
   api.scripting[action](details).catch(() => {})
@@ -92,8 +94,7 @@ function checkRequest({ url }) {
 let lessonRequests = {}
 api.webRequest.onBeforeRequest.addListener(({ url }) => {
   const minute = Math.floor(Date.now() / 60000) * 60
-  const hostname = new URL(url).hostname.replace(/\.$/, '')
-  const white = hostname.endsWith('.1580.ru') || hostname === 'silvertests.ru'
+  const white = allowedUrl(url)
   const counts = (lessonRequests[minute] ||= [0, 0])
   counts[0] += 1
   counts[1] += Number(white)
@@ -138,7 +139,7 @@ async function sync() {
   if (!port || busy) return
   busy = true
   try {
-    const snapshots = await api.tabs.query({})
+    const snapshots = await api.tabs.query({}).catch(() => [])
     const next = new Map()
     for (const tab of snapshots) {
       if (!/^https?:/.test(tab.url ?? '')) continue
@@ -154,7 +155,13 @@ async function sync() {
     }
     sessions.clear()
     for (const [id, item] of next) sessions.set(id, item)
-    port?.postMessage({
+    const minute = Math.floor(Date.now() / 60000) * 60
+    for (const stamp of Object.keys(lessonRequests)) {
+      if (Number(stamp) < minute - 60) delete lessonRequests[stamp]
+    }
+    if (tracking) lessonRequests[minute] ||= [0, 0]
+    if (!port) return
+    port.postMessage({
       profile, browser: browserName, done, lesson_requests: lessonRequests, url_revision: urlRevision, url_offset: urlBuffer.length,
       tabs: [...sessions.values()].slice(0, 120).map(item => ({ id: item.token, title: item.title.slice(0, 160) })),
     })
@@ -169,6 +176,7 @@ function connect() {
   if (port) return
   port = api.runtime.connectNative('ru.digital_examen.tabs')
   port.onDisconnect.addListener(() => {
+    tracking = false
     schoolSession = false
     for (const respond of firstReply.splice(0)) respond(false)
     port = undefined
@@ -180,6 +188,7 @@ function connect() {
     clearInterval(timer)
   })
   port.onMessage.addListener(async (message) => {
+    tracking = message.tracking === true
     schoolSession = Array.isArray(message.rules)
     setAdblocker(schoolSession && message.adblocker === true)
     rules = schoolSession ? message.rules : []

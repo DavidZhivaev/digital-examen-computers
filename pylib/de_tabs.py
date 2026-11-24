@@ -61,7 +61,7 @@ def process(uid, data):
                 if isinstance(token, str) and TOKEN.fullmatch(token) and isinstance(title, str):
                     tabs[token] = {"id": token, "title": title[:500], "browser": browser}
         counts = data.get("lesson_requests")
-        if isinstance(counts, dict) and len(counts) <= 2:
+        if isinstance(counts, dict):
             minute = int(time.time()) // 60 * 60
             for stamp in (minute - 60, minute):
                 count = counts.get(str(stamp))
@@ -77,7 +77,7 @@ def process(uid, data):
             if pending and pending[0] == profile and isinstance(success, bool):
                 pending[2] = success
         READY.notify_all()
-        response = {"close": [key for key, item in PENDING.items()
+        response = {"tracking": True, "close": [key for key, item in PENDING.items()
                               if item[0] == profile and item[1] > now and item[2] is None]}
         if RULES is not None:
             response["rules"] = RULES

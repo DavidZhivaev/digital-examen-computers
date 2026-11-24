@@ -20,6 +20,7 @@ import de_control
 import de_inspection
 import de_learned
 import de_lesson_activity
+import de_network_events
 import de_mass_commands
 import de_tabs
 
@@ -160,17 +161,13 @@ def cpu_sample():
 
 
 def network_bytes():
-    total = 0
-    try:
-        for line in open("/proc/net/dev").readlines()[2:]:
-            name, rest = line.split(":", 1)
-            if name.strip() == "lo":
-                continue
-            fields = rest.split()
-            total += int(fields[0]) + int(fields[8])
-    except (IOError, ValueError, IndexError):
-        return None
-    return total
+    device = de_network_events.active_interface()
+    if device:
+        try:
+            return device, de_network_events.interface_bytes(device)
+        except (OSError, ValueError):
+            pass
+    return None
 
 
 def first_number(path):
@@ -201,8 +198,9 @@ def stats_loop():
         current_net = network_bytes()
         now = time.time()
         kbits = None
-        if previous_net is not None and current_net is not None and now > previous_time:
-            kbits = (current_net - previous_net) * 8.0 / 1000.0 / (now - previous_time)
+        if (previous_net and current_net and current_net[0] == previous_net[0]
+                and current_net[1] >= previous_net[1] and now > previous_time):
+            kbits = (current_net[1] - previous_net[1]) * 8.0 / 1000.0 / (now - previous_time)
         previous_net = current_net
         previous_time = now
 
@@ -267,6 +265,7 @@ def heartbeat_loop():
                  if line.startswith("btime ")), None)
     last_conflict = ""
     while True:
+        deadline = time.monotonic() + HEARTBEAT_INTERVAL
         hostname = socket.gethostname()
         place = de_common.hostname_place(hostname)
         target = "%dk-%d-%d" % place if place else COMPUTER
@@ -274,6 +273,9 @@ def heartbeat_loop():
         url = API.rstrip("/") + "/api/computers/device/heartbeat"
         payload = {"computer": COMPUTER, "online": True, "login": de_common.current_user(),
                    "boot": boot, "command_jobs": True}
+        network = de_network_events.snapshot(time.time())
+        if network is not None:
+            payload["network"] = network
         report = de_lesson_activity.snapshot(time.time())
         if report:
             payload["lesson_activity"] = report[0]
@@ -281,21 +283,21 @@ def heartbeat_loop():
             payload.update(hostname=hostname, sync_screen=moved)
         try:
             try:
-                answer = de_common.send_json(url, payload, "proxy", 15)
+                answer = de_common.send_json(url, payload, "proxy", HEARTBEAT_INTERVAL)
             except urllib.error.HTTPError as error:
                 if moved and error.code == 409:
                     if target != last_conflict:
                         log("место %s занято. Удалите прежнее устройство в настройках кабинета" % target)
                         last_conflict = target
                     payload.pop("hostname", None)
-                    answer = de_common.send_json(url, payload, "proxy", 15)
+                    answer = de_common.send_json(url, payload, "proxy", HEARTBEAT_INTERVAL)
                     save_heartbeat_policy(answer)
-                    time.sleep(HEARTBEAT_INTERVAL)
+                    time.sleep(max(0, deadline - time.monotonic()))
                     continue
                 if not moved or error.code != 403:
                     raise
                 payload["computer"] = target
-                answer = de_common.send_json(url, payload, "proxy", 15, identity=target)
+                answer = de_common.send_json(url, payload, "proxy", HEARTBEAT_INTERVAL, identity=target)
             if answer.get("remove_agent") is True and answer.get("computer") == COMPUTER:
                 subprocess.run([
                     "systemd-run", "--unit=de-agent-removal", "--collect", "/bin/sh",
@@ -303,6 +305,8 @@ def heartbeat_loop():
                 ], check=True)
                 return
             de_lesson_activity.configure(answer.get("lesson_start"))
+            if network is not None and answer.get("network_saved"):
+                de_network_events.acknowledge(network)
             if report:
                 de_lesson_activity.acknowledged(report)
             save_heartbeat_policy(answer)
@@ -324,7 +328,7 @@ def heartbeat_loop():
                     de_common.write_file(de_common.SCREEN_ENABLED_FILE, "0")
         except (OSError, ValueError, subprocess.CalledProcessError):
             pass
-        time.sleep(HEARTBEAT_INTERVAL)
+        time.sleep(max(0, deadline - time.monotonic()))
 
 
 def command_jobs_loop():
@@ -383,6 +387,7 @@ def main():
     write_mode(0)
     threading.Thread(target=de_tabs.listen, daemon=True).start()
     threading.Thread(target=de_lesson_activity.listen, daemon=True).start()
+    threading.Thread(target=de_network_events.monitor, daemon=True).start()
     threading.Thread(target=stats_loop, daemon=True).start()
     if API:
         threading.Thread(target=heartbeat_loop, daemon=True).start()
