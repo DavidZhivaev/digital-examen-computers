@@ -167,7 +167,7 @@ def request(flow):
         return
     if (inspection.host_name(request.host) == "vk.com"
             and request.path.partition("?")[0] == "/js/api/openapi.js"):
-        flow.response = http.Response.make(403, b"", {
+        flow.response = http.Response.make(200, b"", {
             "Content-Type": "application/javascript",
             "Cache-Control": "no-store",
         })
