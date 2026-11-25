@@ -24,6 +24,12 @@ if [ "$here" != "$repo" ]; then
         [ ! -e "$repo" ] || { echo "Каталог $repo уже занят" >&2; exit 1; }
         git -c safe.directory="$here" clone --no-local -- "$here" "$repo"
         git -C "$repo" remote set-url origin https://github.com/DavidZhivaev/digital-examen-computers.git
+    elif [ ! -f "$state/installed-revision" ]; then
+        # An interrupted install may have left an older copy under /opt.
+        git -c safe.directory="$here" -C "$repo" fetch --no-tags "$here" HEAD
+        if ! git -C "$repo" merge-base --is-ancestor FETCH_HEAD HEAD; then
+            git -C "$repo" merge --ff-only FETCH_HEAD
+        fi
     fi
     exec sh "$repo/setup.sh" "$@"
 fi
