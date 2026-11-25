@@ -78,16 +78,23 @@ def computer():
 
 
 def hostname_place(hostname):
-    match = re.fullmatch(r"m1580-([0-9]{1,2})-([0-9]{1,4})-([0-9]{1,3})", hostname)
+    match = re.fullmatch(r"([a-z])1580-([0-9]{1,2})-([a-z0-9]{1,16})-([0-9]{1,3})", hostname)
     if match:
-        place = tuple(map(int, match.groups()))
-        if all(place):
-            return place
+        prefix, corpus, room, number = match.groups()
+        if room.isdecimal():
+            room = room.lstrip("0")
+        if int(corpus) and room and int(number):
+            return int(corpus), room, int(number), "" if prefix == "m" else prefix
     return None
 
 
+def place_name(place):
+    corpus, room, number, prefix = place
+    return f"{prefix}{corpus}k-{room}-{number}"
+
+
 def write_place(name, place, **settings):
-    corpus, room, number = place
+    corpus, room, number, _prefix = place
     values = read_config()
     values.update(settings, DE_COMPUTER_ID=name, DE_COMPUTER_CORPUS=corpus,
                   DE_COMPUTER_ROOM=room, DE_COMPUTER_NUMBER=number)

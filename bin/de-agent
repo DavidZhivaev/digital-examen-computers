@@ -268,7 +268,7 @@ def heartbeat_loop():
         deadline = time.monotonic() + HEARTBEAT_INTERVAL
         hostname = socket.gethostname()
         place = de_common.hostname_place(hostname)
-        target = "%dk-%d-%d" % place if place else COMPUTER
+        target = de_common.place_name(place) if place else COMPUTER
         moved = target != COMPUTER
         url = API.rstrip("/") + "/api/computers/device/heartbeat"
         payload = {"computer": COMPUTER, "online": True, "login": de_common.current_user(),

@@ -82,7 +82,7 @@ def main():
     hostname = socket.gethostname()
     place = de_common.hostname_place(hostname)
     if place is None:
-        say("Ожидается hostname вида m1580-2-418-1 с положительными числами")
+        say("Ожидается hostname вида m1580-2-418-1 или m1580-2-it1-1")
         return 1
 
     fetch_public_key()
@@ -92,7 +92,7 @@ def main():
         return 1
 
     say("Постановка %s на учёт, сайт %s" % (hostname, API))
-    name = "%dk-%d-%d" % place
+    name = de_common.place_name(place)
     try:
         created = call("/api/computers/device/enroll", {
             "hostname": hostname,
