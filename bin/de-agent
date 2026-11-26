@@ -80,10 +80,11 @@ def save_policy(policy):
     if not isinstance(policy, dict):
         return
     text = json.dumps(policy, sort_keys=True)
-    if de_common.read_file(POLICY_FILE) == text:
-        return
-    de_common.write_file(POLICY_FILE, text)
-    log("политика ограничений обновлена")
+    if de_common.read_file(POLICY_FILE) != text:
+        de_common.write_file(POLICY_FILE, text)
+        log("политика ограничений обновлена")
+    if policy.get("groups"):
+        de_common.write_file(os.path.join(de_common.RUN_DIR, "network-owned"), "1", 0o600)
 
 
 def power(action):

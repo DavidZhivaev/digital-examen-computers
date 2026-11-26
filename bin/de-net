@@ -59,6 +59,10 @@ RELAY_CLIENTS = set()
 EXPECTED_RULES = None
 VPN_ENABLED = False
 
+def network_owned():
+    return (de_inspection.RUN / "network-owned").exists()
+
+
 def blocked_response():
     body = de_inspection.block_page()
     return (b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/html; charset=utf-8\r\n"
@@ -223,9 +227,10 @@ def inspector_ready():
 def update_people():
     global PEOPLE, EXPECTED_RULES
     groups = de_inspection.groups.get()
-    if not direct_routes({entry.pw_uid for entry in de_common.people()} if not groups else set()):
+    owned = network_owned()
+    if not direct_routes({entry.pw_uid for entry in de_common.people()} if owned and not groups else set()):
         log("не удалось обновить прямые маршруты")
-    enabled = (groups and not (de_inspection.RUN / "block-off").exists()
+    enabled = (owned and groups and not (de_inspection.RUN / "block-off").exists()
                and inspector_ready())
     current = {entry.pw_uid for entry in de_common.people()} if enabled else set()
     if current == PEOPLE:
@@ -280,9 +285,12 @@ def stop_games():
 def reconcile_loop():
     next_config_check = 0
     while True:
-        relay_exception(True)
+        owned = network_owned()
+        relay_exception(owned)
+        if owned:
+            relay_route(True)
         now = time.monotonic()
-        if now >= next_config_check:
+        if owned and now >= next_config_check:
             de_ansible_network.reconcile()
             next_config_check = now + 60
         time.sleep(15)
@@ -922,11 +930,12 @@ def main():
     else:
         threading.Thread(target=ipv6.serve_forever, daemon=True).start()
         threading.Thread(target=dns_loop, args=(ipv6_dns,), daemon=True).start()
-    relay_exception(True)
+    owned = network_owned()
+    relay_exception(owned)
     if not rules_up() or not update_people():
         log("правила сети не поставились")
         return 1
-    if not relay_route(True):
+    if owned and not relay_route(True):
         log("не удалось настроить прямой маршрут веб-реле")
     threading.Thread(target=origin.serve_forever, daemon=True).start()
     threading.Thread(target=people_loop, daemon=True).start()

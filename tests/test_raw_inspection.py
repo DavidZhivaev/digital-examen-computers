@@ -92,6 +92,7 @@ class RawInspectionTests(unittest.TestCase):
 
     def test_no_restriction_groups_means_no_redirected_users(self):
         with patch.object(de_inspection.groups, "get", return_value=[]), patch.object(relay, "PEOPLE", {509}), \
+                patch.object(relay, "network_owned", return_value=True), \
                 patch.object(relay.de_common, "people", return_value=[SimpleNamespace(pw_uid=509)]), \
                 patch.object(relay, "direct_routes", return_value=True) as direct, \
                 patch.object(relay, "nft", return_value=True) as nft, patch.object(relay, "installed_rules"):
