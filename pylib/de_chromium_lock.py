@@ -1,6 +1,7 @@
 #!/usr/bin/python3.8
 
 import os
+import errno
 from pathlib import Path
 import pwd
 import socket
@@ -16,13 +17,23 @@ def clear_stale_lock(home):
         host, separator, pid = original.rpartition("-")
         if not separator or not host or host == socket.gethostname() or not pid.isdecimal():
             return
-        if int(pid) <= 1 or (profile / "SingletonSocket").is_socket():
+        if int(pid) <= 1:
             return
         try:
             os.kill(int(pid), 0)
             return
         except ProcessLookupError:
             pass
+        # A crashed browser can leave a Unix socket inode behind. Only a
+        # listener proves that the profile is still in use.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(.2)
+            try:
+                probe.connect(str(profile / "SingletonSocket"))
+                return
+            except OSError as error:
+                if error.errno not in (errno.ENOENT, errno.ECONNREFUSED):
+                    return
         if os.readlink(lock) == original:
             lock.unlink()
     except (OSError, OverflowError, ValueError):
