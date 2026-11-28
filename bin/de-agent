@@ -17,6 +17,7 @@ sys.path.insert(0, "/usr/local/lib/digital-examen")
 
 import de_common
 import de_freeze
+import de_terminal
 import de_control
 import de_inspection
 import de_learned
@@ -96,6 +97,10 @@ def power(action):
 def apply(command):
     name = command.get("name", "")
     if de_freeze.frozen() and name != "policy":
+        return
+
+    if name == "terminal-open":
+        de_terminal.open_session(command)
         return
 
     if name == "live":
@@ -272,6 +277,8 @@ def save_heartbeat_policy(answer):
             de_lesson_activity.active = False
             de_lesson_activity.configure(None)
         de_freeze.apply(freezing)
+        if freezing:
+            de_terminal.close_all()
 
 
 def heartbeat_loop():
@@ -442,6 +449,7 @@ def main():
 
 
 def stop(_signum, _frame):
+    de_terminal.close_all()
     raise SystemExit(0)
 
 

@@ -2,7 +2,7 @@ FROM alpine:3.20
 
 RUN apk add --no-cache python3 py3-pillow imagemagick imagemagick-webp ffmpeg
 
-COPY receiver.py frames.py glue.py recode.py lifecycle.py report.py space.py night.sh report-loop.sh /usr/local/bin/
+COPY receiver.py terminal.py frames.py glue.py recode.py lifecycle.py report.py space.py night.sh report-loop.sh /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/receiver.py /usr/local/bin/glue.py \
     /usr/local/bin/recode.py /usr/local/bin/lifecycle.py /usr/local/bin/report.py
 

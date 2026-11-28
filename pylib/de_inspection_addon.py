@@ -14,7 +14,18 @@ import de_learned
 import de_inspection as inspection
 
 
-def blocked():
+def blocked(flow=None):
+    # API callers must receive an API error, never an HTML document in place of JSON.
+    if flow is not None:
+        accept = flow.request.headers.get("accept", "").lower()
+        response_type = flow.response.headers.get("content-type", "").lower() if flow.response else ""
+        if "application/json" in accept or "+json" in accept or "json" in response_type.partition(";")[0]:
+            return http.Response.make(403, json.dumps({
+                "type": "about:blank", "title": "Запрос заблокирован ограничениями школы",
+                "status": 403, "code": "school_restriction",
+            }, ensure_ascii=False).encode("utf-8"), {
+                "Content-Type": "application/problem+json; charset=utf-8", "Cache-Control": "no-store",
+            })
     return http.Response.make(403, inspection.block_page(), {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store",
@@ -24,7 +35,7 @@ def blocked():
 
 def deny(flow, reason, group="", trigger=""):
     de_block_history.remember(flow.request.pretty_url, reason, group, trigger)
-    flow.response = blocked()
+    flow.response = blocked(flow)
 
 
 def deny_phrase(flow, parts, rules):
@@ -34,7 +45,7 @@ def deny_phrase(flow, parts, rules):
 
 def block_response_headers(flow, denial):
     de_block_history.remember(flow.request.pretty_url, *denial)
-    response = blocked()
+    response = blocked(flow)
     chunks = iter(([response.raw_content],) if flow.request.method != "HEAD" else ())
     response.stream = lambda _: next(chunks, [])
     flow.response = response

@@ -49,6 +49,20 @@ class RawInspectionTests(unittest.TestCase):
         with patch.object(de_common.shutil, "which", return_value=None),                 patch.object(de_common.os, "access", side_effect=lambda path, mode: path == "/bin/loginctl"):
             self.assertEqual(de_common.loginctl(), "/bin/loginctl")
 
+    def test_blocked_json_api_keeps_the_403_without_an_html_response(self):
+        try:
+            from mitmproxy import http
+            import de_inspection_addon as addon
+        except ImportError:
+            self.skipTest("mitmproxy is required")
+        flow = SimpleNamespace(request=http.Request.make("GET", "https://example.org/api", headers={"Accept": "application/json"}), response=None)
+        with patch.object(addon.de_block_history, "remember"):
+            addon.deny(flow, "Триггер-фраза", "group", "pattern")
+        self.assertEqual(flow.response.status_code, 403)
+        self.assertIn("application/problem+json", flow.response.headers["content-type"])
+        self.assertEqual(json.loads(flow.response.content)["code"], "school_restriction")
+        self.assertNotIn(b"<html", flow.response.content)
+
     def test_domain_patterns_and_ip_networks(self):
         from de_patterns import matches
 

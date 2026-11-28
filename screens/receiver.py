@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import space
+import terminal
 
 DATA_DIR = os.environ.get("DE_SCREEN_DATA", "/data/digital-examen/screens")
 LIVE_DIR = os.environ.get("DE_SCREEN_LIVE", "/run/digital-examen/live")
@@ -313,6 +314,8 @@ class Handler(BaseHTTPRequestHandler):
         route = urlparse(self.path).path.rstrip("/")
         query = parse_qs(urlparse(self.path).query)
 
+        if terminal.handle(self, route, query, True, queue_command, safe_name):
+            return
         if route == "/frame":
             self.take_frame()
             return
@@ -480,6 +483,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         parts = parsed.path.strip("/").split("/")
+
+        if terminal.handle(self, parsed.path.rstrip("/"), query, False, queue_command, safe_name):
+            return
 
         if parts[0] == "health":
             self.reply(200, {"ok": True})
