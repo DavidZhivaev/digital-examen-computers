@@ -54,3 +54,31 @@ class FreezeTests(unittest.TestCase):
             with self.subTest(unit=unit):
                 self.assertIn("ConditionPathExists=!/var/lib/digital-examen/frozen",
                               (ROOT / "systemd" / unit).read_text())
+
+
+class FrozenUpdateTests(unittest.TestCase):
+    def function(self):
+        import ast, os, signal, subprocess, time
+        tree = ast.parse((ROOT / "bin/de-update").read_text())
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run")
+        ns = dict(os=os, signal=signal, subprocess=subprocess, time=time, de_freeze=de_freeze, REPO_DIR="/tmp")
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "de-update", "exec"), ns)
+        return ns["run"], ns
+
+    def test_update_fetch_does_not_start_while_frozen(self):
+        run, ns = self.function()
+        with patch.object(de_freeze, "frozen", return_value=True), \
+                patch.object(ns["subprocess"], "Popen") as start:
+            self.assertEqual(run(["git", "fetch", "origin", "main"])[0], 125)
+            start.assert_not_called()
+
+    def test_freeze_cancels_the_whole_active_fetch_process_group(self):
+        run, ns = self.function()
+        with patch.object(de_freeze, "frozen", side_effect=[False, True]), \
+                patch.object(ns["subprocess"], "Popen") as start, \
+                patch.object(ns["os"], "killpg") as kill:
+            start.return_value.pid = 424242
+            start.return_value.communicate.return_value = (b"", None)
+            self.assertEqual(run(["git", "fetch", "origin", "main"])[0], 125)
+            kill.assert_called_once_with(424242, ns["signal"].SIGTERM)
+            self.assertTrue(start.call_args.kwargs["start_new_session"])

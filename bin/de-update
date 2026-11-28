@@ -2,6 +2,7 @@
 
 import fcntl
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -9,6 +10,7 @@ import time
 sys.path.insert(0, "/usr/local/lib/digital-examen")
 
 import de_common
+import de_freeze
 import de_migrations
 
 CONFIG_FILE = "/etc/digital-examen/computers.conf"
@@ -52,6 +54,31 @@ def log(message):
 
 
 def run(command):
+    if command[:2] == ["git", "fetch"]:
+        if de_freeze.frozen():
+            return 125, "обновление отложено: компьютер заморожен"
+        try:
+            process = subprocess.Popen(command, cwd=REPO_DIR, stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT, start_new_session=True)
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline and not de_freeze.frozen():
+                try:
+                    output, _ = process.communicate(timeout=1)
+                    return process.returncode, output.decode("utf-8", "replace").strip()
+                except subprocess.TimeoutExpired:
+                    pass
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                output, _ = process.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                output, _ = process.communicate()
+            return 125, "запрос обновления отменён: заморозка или таймаут"
+        except OSError as error:
+            return 1, str(error)
     try:
         done = subprocess.run(command, cwd=REPO_DIR, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, timeout=300)
@@ -84,6 +111,8 @@ def migrate():
 
 
 def main():
+    if de_freeze.frozen():
+        return 0
     if not os.path.isdir(os.path.join(REPO_DIR, ".git")):
         log("репозиторий агента отсутствует")
         return 1
@@ -102,6 +131,8 @@ def main():
         log("fetch не прошёл: " + out[:200])
         return 1
 
+    if de_freeze.frozen():
+        return 0
     code, out = run(["git", "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"])
     if code != 0:
         log("полученная ветка не продолжает установленную версию")
@@ -118,6 +149,8 @@ def main():
     if after == before and installation_exists():
         return migrate()
 
+    if de_freeze.frozen():
+        return 0
     log("обновление %s -> %s, переустанавливаю" % (before[:8], after[:8]))
 
     try:
