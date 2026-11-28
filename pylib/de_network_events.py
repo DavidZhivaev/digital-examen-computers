@@ -2,6 +2,7 @@
 import json
 import ipaddress
 import os
+import select
 from pathlib import Path
 import subprocess
 import threading
@@ -89,11 +90,22 @@ def interface_bytes(device):
 
 def monitor_changes():
     while True:
+        if de_freeze.frozen():
+            time.sleep(1)
+            continue
         try:
             with subprocess.Popen(["stdbuf", "-oL", "nmcli", "monitor"], stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, text=True) as process:
-                for _ in process.stdout:
-                    WAKE.set()
+                while process.poll() is None and not de_freeze.frozen():
+                    ready, _, _ = select.select([process.stdout], [], [], 1)
+                    if ready and process.stdout.readline():
+                        WAKE.set()
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
         except OSError:
             pass
         time.sleep(3)

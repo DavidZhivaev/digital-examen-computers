@@ -33,3 +33,12 @@ class NetworkIdentityTests(unittest.TestCase):
         with patch.object(network, "STATE_DATA", {}), \
                 patch.object(network, "nmcli", side_effect=self.connection("802-3-ethernet", "")):
             self.assertEqual(network.selected_connection()[2], "Проводное соединение")
+
+
+    def test_frozen_agent_does_not_start_network_observer(self):
+        with patch.object(network.de_freeze, "frozen", return_value=True), \
+                patch.object(network.subprocess, "Popen") as start, \
+                patch.object(network.time, "sleep", side_effect=InterruptedError):
+            with self.assertRaises(InterruptedError):
+                network.monitor_changes()
+            start.assert_not_called()
