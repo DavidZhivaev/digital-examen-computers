@@ -24,6 +24,12 @@ if [ "$here" != "$repo" ]; then
         [ ! -e "$repo" ] || { echo "Каталог $repo уже занят" >&2; exit 1; }
         git -c safe.directory="$here" clone --no-local -- "$here" "$repo"
         git -C "$repo" remote set-url origin https://github.com/DavidZhivaev/digital-examen-computers.git
+    elif [ ! -f "$state/installed-revision" ]; then
+        # An interrupted install may have left an older copy under /opt.
+        git -c safe.directory="$here" -C "$repo" fetch --no-tags "$here" HEAD
+        if ! git -C "$repo" merge-base --is-ancestor FETCH_HEAD HEAD; then
+            git -C "$repo" merge --ff-only FETCH_HEAD
+        fi
     fi
     exec sh "$repo/setup.sh" "$@"
 fi
@@ -32,7 +38,9 @@ sh "$here/bin/de-deps"
 sh "$here/bin/de-inspect-install" "$here/config/inspection-requirements.txt"
 install -d -m 0755 /etc/digital-examen /usr/local/lib/digital-examen
 install -d -m 0700 "$state" "$state/screen-queue"
-install -m 0644 "$here/config/block.html" /etc/digital-examen/block.html
+for asset in block.html error.html direct-sites.txt; do
+    install -m 0644 "$here/config/$asset" "/etc/digital-examen/$asset"
+done
 manifest=$(mktemp "$state/.installed-files.XXXXXX")
 trap 'unlink "$manifest" 2>/dev/null || true' EXIT
 put() {

@@ -36,7 +36,7 @@ def request(path, body=None, token=None):
         return json.load(answer)
 
 
-def login():
+def login(*, operator=True):
     username = input("Логин сайта: ").strip()
     password = getpass.getpass("Пароль сайта: ")
     challenge = request("/auth/pow/challenge", {"platform": "desktop"})
@@ -56,6 +56,8 @@ def login():
         "login": username, "password": password, "device_name": socket.gethostname() + " · de",
         "pow_challenge_id": challenge_id, "pow_solution": solution,
     })
+    if not operator:
+        return session["access_token"]
     return request("/computers/cli/session", {}, session["access_token"])["access_token"]
 
 
@@ -147,6 +149,7 @@ def main():
         "adblocker": "Показать состояние или включить блокировку рекламных ресурсов. После перезагрузки режим on.",
         "block": "Временно переключить интернет-фильтр с входом оператора. После загрузки компьютера фильтр включён.",
         "screen": "Временно переключить отправку кадров с входом оператора. После загрузки компьютера отправка разрешена.",
+        "tg": "Включить Telegram-прокси до перезагрузки. Для on нужен вход на сайт.",
         "vpn": "Показать состояние или разрешить трафик через системные VPN-интерфейсы. После перезагрузки режим off.",
     }
     parsers = {name: commands.add_parser(name, help=description, description=description)
@@ -155,11 +158,16 @@ def main():
     parsers["ssh"].add_argument("user", nargs="?", help="Учётная запись на целевом компьютере")
     for name in ("adblocker", "vpn"):
         parsers[name].add_argument("mode", choices=("on", "off", "status"), nargs="?", default="status")
-    for name in ("block", "screen"):
+    for name in ("block", "screen", "tg"):
         parsers[name].add_argument("mode", choices=("on", "off"))
     args = parser.parse_args()
     if args.action == "help":
         parser.print_help()
+        return
+    if args.action == "tg":
+        arguments = {"token": login(operator=False)} if args.mode == "on" else {}
+        answer = control("tg", mode=args.mode, **arguments)
+        print("tg", answer["mode"])
         return
     if args.action in ("block", "screen"):
         answer = control(args.action, mode=args.mode, token=login())
@@ -178,9 +186,9 @@ def main():
         print("Запрос на обновление отправлен.")
         return
     name = args.computer if args.action == "ssh" else socket.gethostname()
-    place = re.fullmatch(r"[a-z]1580-([0-9]{1,2})-([0-9]{1,4})-([0-9]{1,3})", name)
-    if place is None or not all(map(int, place.groups())):
-        raise ValueError("Введите hostname в формате m1580-1-100-1")
+    place = re.fullmatch(r"[a-z]1580-([0-9]{1,2})-([a-z0-9]{1,16})-([0-9]{1,3})", name)
+    if place is None or not (int(place[1]) and place[2].lstrip("0") and int(place[3])):
+        raise ValueError("Введите hostname компьютера в формате m1580-1-100-1 или m1580-1-it1-1")
 
     if args.action == "ssh" and args.user:
         if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_.-]{0,63}", args.user):

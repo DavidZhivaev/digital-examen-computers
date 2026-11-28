@@ -27,6 +27,7 @@ import de_common
 import de_patterns
 import de_inspection
 import de_upstream
+import de_telegram
 
 PROXY_PORT = 3129
 DNS_PORT = 5399
@@ -527,8 +528,12 @@ def proxy_target(data):
 
 
 def connect_web(host, port, public_only, timeout=10, preferred=None):
-    key = (host, port)
     trusted = de_inspection.permanent_allow(host)
+    if not trusted:
+        proxy = de_telegram.connect(host, port, RELAY_MARK, timeout)
+        if proxy is not None:
+            return proxy
+    key = (host, port)
     cached = TRUSTED_ADDRESSES.get(key) if trusted else None
     if cached and time.monotonic() < cached[0]:
         addresses = cached[1]
@@ -560,9 +565,9 @@ def connect_web(host, port, public_only, timeout=10, preferred=None):
     raise OSError("сайт недоступен")
 
 
-def inspect_http(client, upstream, data, host, port):
+def inspect_http(client, upstream, data, host, port, trusted=False):
     payload, remaining = de_upstream.http_request(data, host, port)
-    if de_inspection.permanent_allow(host):
+    if trusted or de_inspection.permanent_allow(host):
         first, separator, rest = payload.partition(b"\r\n")
         method, target, version = first.split()
         path = target[len(b"http://" + de_upstream.authority(host, port).encode("ascii")):]
@@ -614,6 +619,14 @@ def inspect_http(client, upstream, data, host, port):
     upstream.sendall(request)
     with http.client.HTTPResponse(upstream, method=method.decode("ascii")) as reply:
         reply.begin()
+        page = de_inspection.error_page(host, reply.status, reply.headers.get("Content-Type", ""))
+        if page:
+            head = (f"HTTP/1.1 {reply.status} Server Error\r\n"
+                    "Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n"
+                    f"Content-Security-Policy: {de_inspection.BLOCK_PAGE_CSP}\r\n"
+                    f"Content-Length: {len(page)}\r\nConnection: close\r\n\r\n").encode("ascii")
+            client.sendall(head if method == b"HEAD" else head + page)
+            return False
         if reply.status == 101:
             raise ValueError("смена протокола не поддерживается")
         fields = reply.getheaders()
@@ -709,7 +722,8 @@ class Handler(socketserver.BaseRequestHandler):
                 pass
             return
 
-        trusted = de_inspection.permanent_allow(host)
+        trusted_destination = de_inspection.permanent_allow(ip)
+        trusted = trusted_destination or de_inspection.permanent_allow(host)
         verdict, group = ("pass", "") if trusted else decide(host)
         inspect_tls = port == 443 and not trusted
         if verdict != "pass" and not inspect_tls and (
@@ -746,17 +760,17 @@ class Handler(socketserver.BaseRequestHandler):
                     upstream.close()
                     raise
             elif trusted:
-                upstream = connect_web(host, port, proxy is not None, timeout=5, preferred=ip)
+                upstream = connect_web(ip if trusted_destination else host, port, proxy is not None, timeout=5, preferred=ip)
             else:
-                upstream = connect_web(host if secure and port == 443 else ip, port, proxy is not None)
+                upstream = connect_web(host if (secure and port == 443) or de_telegram.matches(host) else ip, port, proxy is not None)
         except OSError:
             return
         if port == 80:
             try:
                 with upstream:
-                    if inspect_http(client, upstream, data, host, port):
+                    if inspect_http(client, upstream, data, host, port, trusted):
                         note_block(host, login, "Фильтр содержимого")
-                    else:
+                    elif not trusted:
                         note("site", host, login)
             except (OSError, ValueError, http.client.HTTPException):
                 pass
@@ -765,7 +779,8 @@ class Handler(socketserver.BaseRequestHandler):
             try:
                 if data:
                     upstream.sendall(data)
-                note("site", de_inspection.host_name(host), login)
+                if not trusted:
+                    note("site", de_inspection.host_name(host), login)
                 bridge(client, upstream)
             except OSError:
                 return
@@ -926,6 +941,7 @@ def main():
     threading.Thread(target=people_loop, daemon=True).start()
     threading.Thread(target=stop_games, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
+    threading.Thread(target=de_telegram.close_expired, daemon=True).start()
     notification = os.environ.get("NOTIFY_SOCKET")
     if notification:
         if notification.startswith("@"):

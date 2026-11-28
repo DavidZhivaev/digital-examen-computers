@@ -12,6 +12,7 @@ import de_block_history
 import de_common
 import de_freeze
 import de_lesson_activity
+import de_telegram
 
 RUN = Path(de_common.RUN_DIR)
 SOCKET = RUN / "control.sock"
@@ -33,14 +34,32 @@ class Control(socketserver.StreamRequestHandler):
                     rows = [[stamp, urlsplit(url).netloc, reason, group, trigger]
                             for stamp, url, reason, group, trigger in rows]
                 result = {"history": rows}
+            elif action == "tg" and message.get("mode") in ("on", "off"):
+                mode = message["mode"]
+                if mode == "on":
+                    host = de_common.setting("DE_API_URL").rstrip("/")
+                    if urlsplit(host).scheme != "https":
+                        raise ValueError("Нужен HTTPS-сайт")
+                    request = Request(host + "/api/computers/device/tg-proxy", data=b"{}")
+                    request.add_unredirected_header("Authorization", "Bearer " + message["token"])
+                    request.add_unredirected_header("X-De-Computer", de_common.computer())
+                    request.add_unredirected_header("X-De-Secret", de_common.secret("proxy"))
+                    with urlopen(request, timeout=5) as answer:
+                        proxy = json.load(answer)["proxy"]
+                    de_telegram.parse_proxy(proxy)
+                    de_common.write_file(str(de_telegram.STATE), proxy, mode=0o600)
+                else:
+                    de_telegram.STATE.unlink(missing_ok=True)
+                result = {"mode": mode}
             elif action == "lesson-login" or (action in ("block", "screen") and message.get("mode") in ("on", "off")):
                 host = de_common.setting("DE_API_URL").rstrip("/")
                 if urlsplit(host).scheme != "https":
                     raise ValueError("Вход оператора требует настроенный HTTPS-сайт")
-                request = Request(host + "/api/computers/cli/computers/" + de_common.computer())
+                hostname = socket.gethostname().split(".", 1)[0]
+                request = Request(host + "/api/computers/cli/computers/" + hostname)
                 request.add_unredirected_header("Authorization", "Bearer " + message["token"])
                 with urlopen(request, timeout=5) as answer:
-                    if json.load(answer).get("name") != de_common.computer():
+                    if json.load(answer).get("hostname") != hostname:
                         raise ValueError("Сайт не подтвердил этот компьютер")
                 de_lesson_activity.mark_privileged()
                 result = {"ok": True}
