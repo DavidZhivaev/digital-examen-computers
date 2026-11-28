@@ -151,7 +151,7 @@ def main():
     }
     parsers = {name: commands.add_parser(name, help=description, description=description)
                for name, description in descriptions.items()}
-    parsers["ssh"].add_argument("computer", help="Номер компьютера, например 5k-100-1")
+    parsers["ssh"].add_argument("computer", help="Hostname компьютера, например m1580-5-100-1")
     parsers["ssh"].add_argument("user", nargs="?", help="Учётная запись на целевом компьютере")
     for name in ("adblocker", "vpn"):
         parsers[name].add_argument("mode", choices=("on", "off", "status"), nargs="?", default="status")
@@ -177,15 +177,10 @@ def main():
             request_socket.sendto(b"1", "/run/de-update-request.sock")
         print("Запрос на обновление отправлен.")
         return
-    if args.action == "ssh":
-        name = args.computer
-    else:
-        place = re.fullmatch(r"m1580-(\d+)-(\d+)-(\d+)", socket.gethostname())
-        if place is None:
-            raise ValueError("Имя этого компьютера не соответствует формату m1580-корпус-аудитория-номер")
-        name = "%dk-%d-%d" % tuple(map(int, place.groups()))
-    if not re.fullmatch(r"\d{1,2}k-\d{1,4}-\d{1,3}", name):
-        raise ValueError("Введите имя компьютера в формате 1k-100-1")
+    name = args.computer if args.action == "ssh" else socket.gethostname()
+    place = re.fullmatch(r"[a-z]1580-([0-9]{1,2})-([0-9]{1,4})-([0-9]{1,3})", name)
+    if place is None or not all(map(int, place.groups())):
+        raise ValueError("Введите hostname в формате m1580-1-100-1")
 
     if args.action == "ssh" and args.user:
         if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_.-]{0,63}", args.user):

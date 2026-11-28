@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
@@ -8,6 +9,7 @@ import json
 import base64
 import gzip
 import socket
+import ssl
 import sys
 import tempfile
 import unittest
@@ -28,10 +30,25 @@ with patch("builtins.open", side_effect=open_test_config):
     import de_common
     import de_ansible_network
     import de_inspection
+    import de_upstream
+    import de_patterns
+    import de_block_history
     loader.exec_module(relay)
+sys.path.insert(0, str(ROOT / "pylib"))
 
 
 class RawInspectionTests(unittest.TestCase):
+    def setUp(self):
+        frozen = patch("de_freeze.frozen", return_value=False)
+        frozen.start()
+        self.addCleanup(frozen.stop)
+
+    def test_session_lookup_uses_an_executable_loginctl(self):
+        with patch.object(de_common.shutil, "which", return_value="/bin/loginctl"):
+            self.assertEqual(de_common.loginctl(), "/bin/loginctl")
+        with patch.object(de_common.shutil, "which", return_value=None),                 patch.object(de_common.os, "access", side_effect=lambda path, mode: path == "/bin/loginctl"):
+            self.assertEqual(de_common.loginctl(), "/bin/loginctl")
+
     def test_domain_patterns_and_ip_networks(self):
         from de_patterns import matches
 
@@ -90,9 +107,13 @@ class RawInspectionTests(unittest.TestCase):
 
     def test_no_restriction_groups_means_no_redirected_users(self):
         with patch.object(de_inspection.groups, "get", return_value=[]), patch.object(relay, "PEOPLE", {509}), \
+                patch.object(relay, "network_owned", return_value=True), \
+                patch.object(relay.de_common, "people", return_value=[SimpleNamespace(pw_uid=509)]), \
+                patch.object(relay, "direct_routes", return_value=True) as direct, \
                 patch.object(relay, "nft", return_value=True) as nft, patch.object(relay, "installed_rules"):
             self.assertTrue(relay.update_people())
             self.assertEqual(relay.PEOPLE, set())
+            direct.assert_called_once_with({509})
             nft.assert_called_once_with("flush set inet de_agent people\n")
 
     def test_group_priorities_and_blacklist_union(self):
@@ -183,6 +204,50 @@ class RawInspectionTests(unittest.TestCase):
                 self.assertFalse(de_learned.blocked(url, ("test",)))
         self.assertEqual(de_learned.endpoint("https://yandex.ru/search/?text=test"), "")
 
+    def test_tls_hello_split_across_records(self):
+        output = ssl.MemoryBIO()
+        client = ssl.create_default_context().wrap_bio(ssl.MemoryBIO(), output, server_hostname="sdo.1580.ru")
+        with self.assertRaises(ssl.SSLWantReadError):
+            client.do_handshake()
+        hello = output.read()
+        first = hello[:3] + (32).to_bytes(2, "big") + hello[5:37]
+        second = hello[:3] + (len(hello) - 37).to_bytes(2, "big") + hello[37:]
+        sock = Mock()
+        sock.recv.side_effect = [first, second]
+        data = relay.read_hello(sock)
+        self.assertEqual(data, first + second)
+        self.assertEqual(relay.sni_of(data), "sdo.1580.ru")
+
+    def test_exempt_tls_routes_by_server_name(self):
+        handler = relay.Handler.__new__(relay.Handler)
+        handler.client_address = ("127.0.0.1", 39000)
+        handler.request = Mock()
+        hello = b"\x16"
+        with patch.object(relay, "owner_of", return_value="student"), \
+                patch.object(relay, "read_hello", return_value=hello), \
+                patch.object(relay, "sni_of", return_value="sdo.1580.ru"), \
+                patch.object(relay, "original_target", return_value=("192.0.2.10", 443)), \
+                patch.object(relay, "decide", return_value=("pass", "")), \
+                patch.object(relay, "connect_web", side_effect=OSError) as connect:
+            handler.handle()
+        connect.assert_called_once_with("sdo.1580.ru", 443, False, timeout=5, preferred="192.0.2.10")
+
+    def test_trusted_connection_only_uses_addresses_resolved_for_its_name(self):
+        addresses = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.11", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.12", 443)),
+        ]
+        with patch.dict(relay.TRUSTED_ADDRESSES, clear=True), \
+                patch.object(socket, "getaddrinfo", return_value=addresses) as resolve, \
+                patch.object(socket, "socket") as create:
+            relay.connect_web("sdo.1580.ru", 443, False, preferred="192.0.2.10")
+            relay.connect_web("sdo.1580.ru", 443, False, preferred="192.0.2.12")
+        resolve.assert_called_once_with("sdo.1580.ru", 443, type=socket.SOCK_STREAM)
+        self.assertEqual(
+            [args[0][0] for args in create.return_value.connect.call_args_list],
+            [("192.0.2.11", 443), ("192.0.2.12", 443)],
+        )
+
     def test_origin_transport_accepts_only_the_inspector_side(self):
         handler = relay.InspectionOrigin.__new__(relay.InspectionOrigin)
         handler.client_address = ("127.0.0.1", 39000)
@@ -199,7 +264,7 @@ class RawInspectionTests(unittest.TestCase):
                     patch.object(relay, "connect_web", return_value=upstream) as connect, \
                     patch.object(relay, "bridge") as bridge:
                 handler.handle()
-        connect.assert_called_once_with("sdo.1580.ru", 443, False, timeout=4)
+        connect.assert_called_once_with("sdo.1580.ru", 443, False, timeout=10)
         handler.request.sendall.assert_called_once_with(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         bridge.assert_called_once_with(handler.request, upstream)
 

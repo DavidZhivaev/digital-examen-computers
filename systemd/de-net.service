@@ -1,9 +1,11 @@
 [Unit]
+ConditionPathExists=!/var/lib/digital-examen/frozen
 Description=Digital Examen network policy
 After=de-traffic.service network-online.target
 Wants=de-traffic.service
 
 [Service]
+TimeoutStopSec=3
 Type=notify
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/local/sbin/de-net

@@ -1,9 +1,11 @@
 [Unit]
+ConditionPathExists=!/var/lib/digital-examen/frozen
 Description=Digital Examen локальная проверка HTTPS
 After=network-online.target de-net.service
 ConditionFileIsExecutable=/opt/de-inspect/bin/mitmdump
 
 [Service]
+TimeoutStopSec=3
 Group=de-inspect
 UMask=0077
 StateDirectory=de-inspect

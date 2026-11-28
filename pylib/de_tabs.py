@@ -8,6 +8,7 @@ import time
 import uuid
 
 import de_lesson_activity
+import de_freeze
 
 SOCKET = "/run/digital-examen/browser-tabs.sock"
 TOKEN = re.compile(r"[0-9a-f]{32}")
@@ -25,6 +26,8 @@ ADBLOCKER = False
 
 def activate(session, rules, url_groups, adblocker=False):
     global SESSION, RULES, URL_GROUPS, URL_JSON, URL_REVISION, ADBLOCKER
+    if de_freeze.frozen():
+        session, rules, url_groups, adblocker = None, None, [], False
     with READY:
         if SESSION != session:
             PROFILES.clear()
@@ -39,6 +42,8 @@ def activate(session, rules, url_groups, adblocker=False):
 
 
 def process(uid, data):
+    if de_freeze.frozen():
+        return {"tracking": False, "rules": None, "adblocker": False}
     profile = data.get("profile")
     if not isinstance(profile, str) or not TOKEN.fullmatch(profile):
         return {}
@@ -61,19 +66,23 @@ def process(uid, data):
                 if isinstance(token, str) and TOKEN.fullmatch(token) and isinstance(title, str):
                     tabs[token] = {"id": token, "title": title[:500], "browser": browser}
         counts = data.get("lesson_requests")
-        if isinstance(counts, dict) and len(counts) <= 2:
+        if isinstance(counts, dict):
             minute = int(time.time()) // 60 * 60
             for stamp in (minute - 60, minute):
                 count = counts.get(str(stamp))
                 if type(count) is int and 0 < count <= 100000:
                     de_lesson_activity.record(stamp=stamp, count=count)
+                elif (isinstance(count, list) and len(count) == 2
+                      and all(type(item) is int for item in count)
+                      and 0 <= count[1] <= count[0] <= 100000):
+                    de_lesson_activity.record(stamp=stamp, count=count[1], total=count[0])
         PROFILES[profile] = (now, tabs)
         for token, success in (data.get("done") or {}).items():
             pending = PENDING.get(token)
             if pending and pending[0] == profile and isinstance(success, bool):
                 pending[2] = success
         READY.notify_all()
-        response = {"close": [key for key, item in PENDING.items()
+        response = {"tracking": True, "close": [key for key, item in PENDING.items()
                               if item[0] == profile and item[1] > now and item[2] is None]}
         if RULES is not None:
             response["rules"] = RULES

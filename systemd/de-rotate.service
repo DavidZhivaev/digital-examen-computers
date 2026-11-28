@@ -1,7 +1,9 @@
 [Unit]
+ConditionPathExists=!/var/lib/digital-examen/frozen
 Description=Digital Examen смена секретов компьютера
 After=network-online.target de-secure.service
 
 [Service]
+TimeoutStopSec=3
 Type=oneshot
 ExecStart=/usr/local/sbin/de-rotate

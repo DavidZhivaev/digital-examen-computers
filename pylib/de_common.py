@@ -4,6 +4,7 @@ import json
 import os
 import pwd
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -78,16 +79,22 @@ def computer():
 
 
 def hostname_place(hostname):
-    match = re.fullmatch(r"m1580-([0-9]{1,2})-([0-9]{1,4})-([0-9]{1,3})", hostname)
+    match = re.fullmatch(r"([a-z])1580-([0-9]{1,2})-([0-9]{1,4})-([0-9]{1,3})", hostname)
     if match:
-        place = tuple(map(int, match.groups()))
+        prefix, *numbers = match.groups()
+        place = tuple(map(int, numbers))
         if all(place):
-            return place
+            return (*place, "" if prefix == "m" else prefix)
     return None
 
 
+def place_name(place):
+    corpus, room, number, prefix = place
+    return f"{prefix}{corpus}k-{room}-{number}"
+
+
 def write_place(name, place, **settings):
-    corpus, room, number = place
+    corpus, room, number, _ = place
     values = read_config()
     values.update(settings, DE_COMPUTER_ID=name, DE_COMPUTER_CORPUS=corpus,
                   DE_COMPUTER_ROOM=room, DE_COMPUTER_NUMBER=number)
@@ -120,8 +127,12 @@ def send_json(url, payload, kind="proxy", seconds=20, identity=None):
 
 
 def loginctl():
+    # Some managed images contain a non-executable /usr/bin/loginctl stub.
+    found = shutil.which("loginctl")
+    if found:
+        return found
     for path in ("/usr/bin/loginctl", "/bin/loginctl"):
-        if os.path.exists(path):
+        if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
     return "loginctl"
 
@@ -156,7 +167,9 @@ def sessions():
 def screen_session():
     code, seat = run([loginctl(), "show-seat", "seat0", "-p", "ActiveSession", "--value"], 3)
     if code == 0 and seat.strip():
-        return graphical_session(session_fields(seat.strip()))
+        active = graphical_session(session_fields(seat.strip()))
+        if active is not None:
+            return active
     for values in sessions():
         if graphical_session(values) is not None:
             return values

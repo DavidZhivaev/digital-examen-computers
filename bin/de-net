@@ -32,15 +32,21 @@ PROXY_PORT = 3129
 DNS_PORT = 5399
 TABLE = "de_agent"
 RELAY_MARK = 0x44450000
+DIRECT_WEB_IP = "217.107.34.59"
 SCHOOL_PROXY_MARK = 0x44450001
 RELAY_RULE = ["pref", "8999", "fwmark", hex(RELAY_MARK) + "/0xffffffff", "lookup", "main"]
+DIRECT_WEB_RULES = [
+    ["pref", "8998", "to", DIRECT_WEB_IP, "ipproto", "tcp", "dport", port, "lookup", "main"]
+    for port in ("80", "443")
+]
 TRAFFIC_SOCKET = os.path.join(de_common.RUN_DIR, "traffic.sock")
 AI_URL = de_common.setting("DE_API_URL", "").rstrip("/") + "/api/computers/device/ai"
-PEOPLE_EVERY = 10
+PEOPLE_EVERY = 2
 
 TOLD = {}
 AI_CACHE = {}
 AI_PENDING = set()
+TRUSTED_ADDRESSES = {}
 AI_WORKERS = ThreadPoolExecutor(max_workers=2)
 AI_HOSTS = de_patterns.read_list(os.path.join(
     de_common.setting("DE_REPO_DIR", "/opt/digital-examen-computers"),
@@ -48,8 +54,13 @@ AI_HOSTS = de_patterns.read_list(os.path.join(
 ))
 LOCK = threading.Lock()
 PEOPLE = set()
+RELAY_CLIENTS = set()
 EXPECTED_RULES = None
 VPN_ENABLED = False
+
+def network_owned():
+    return (de_inspection.RUN / "network-owned").exists()
+
 
 def blocked_response():
     body = de_inspection.block_page()
@@ -96,6 +107,7 @@ table inet %(table)s {
     }
     chain nat_out {
         type nat hook output priority -100; policy accept;
+        meta skuid @people ip daddr %(direct_web_ip)s tcp dport { 80, 443 } return
         %(vpn_nat)s
         meta skuid @people ip daddr != 127.0.0.0/8 tcp dport { 80, 443 } redirect to :%(proxy)d
         meta skuid @people ip6 daddr != ::1 tcp dport { 80, 443 } redirect to :%(proxy)d
@@ -111,6 +123,7 @@ table inet %(table)s {
         ip6 daddr ::1 udp dport %(dns)d accept
         tcp dport { %(inspect)d, %(origin)d } reject with tcp reset
         %(vpn_filter)s
+        ip daddr %(direct_web_ip)s tcp dport { 80, 443 } accept
         oifname "lo" accept
         meta l4proto tcp reject with tcp reset
         reject
@@ -118,7 +131,8 @@ table inet %(table)s {
 }
 """ % {"table": TABLE, "proxy": PROXY_PORT, "dns": DNS_PORT,
         "inspect": de_inspection.LISTEN_PORT, "origin": de_inspection.ORIGIN_PORT, "users": users,
-        "vpn_nat": vpn_nat, "vpn_filter": vpn_filter})
+        "vpn_nat": vpn_nat, "vpn_filter": vpn_filter,
+        "direct_web_ip": DIRECT_WEB_IP})
     if ok:
         VPN_ENABLED = vpn_enabled
     EXPECTED_RULES = installed_rules() if ok else None
@@ -139,6 +153,8 @@ def relay_exception(enable):
             ["-d", loopback, "-p", "tcp", "--dport", str(PROXY_PORT)],
             ["-d", loopback, "-p", "udp", "--dport", str(DNS_PORT)],
         ]
+        if tool == "iptables":
+            rules.append(["-d", DIRECT_WEB_IP, "-p", "tcp", "-m", "multiport", "--dports", "80,443"])
         if inspection_gid is not None:
             rules.append(["-m", "owner", "--gid-owner", str(inspection_gid), "-p", "tcp", "--dport", "443"])
         prefix = [tool, "-w", "2"]
@@ -159,16 +175,44 @@ def relay_exception(enable):
 
 def relay_route(enable):
     try:
-        return subprocess.call(["ip", "-4", "rule", "add" if enable else "del", *RELAY_RULE],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+        results = [
+            subprocess.call(["ip", "-4", "rule", "add" if enable else "del", *rule],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for rule in (RELAY_RULE, *DIRECT_WEB_RULES)
+        ]
+        return not any(results)
     except FileNotFoundError:
         return False
 
 
 def rules_down():
+    direct_routes(set())
     relay_route(False)
     subprocess.call(["nft", "delete", "table", "inet", TABLE],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def direct_routes(users):
+    wanted = {(family, uid) for family in ("-4", "-6") for uid in users}
+    actual = set()
+    for family in ("-4", "-6"):
+        result = subprocess.run(["ip", "-N", family, "rule", "show"], capture_output=True, text=True)
+        if result.returncode:
+            return False
+        for line in result.stdout.splitlines():
+            match = re.fullmatch(r"8997:\s+from all uidrange (\d+)-\1 lookup (?:main|254) proto(?:col)? 158", line.strip())
+            if match:
+                actual.add((family, int(match[1])))
+    for family, uid in actual ^ wanted:
+        add = (family, uid) in wanted
+        args = ["ip", family, "rule", "add" if add else "del",
+                "pref", "8997", "uidrange", f"{uid}-{uid}", "lookup", "main", "protocol", "158"]
+        if subprocess.call(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
+            if add:
+                actual.add((family, uid))
+            else:
+                actual.discard((family, uid))
+    return actual == wanted
 
 
 def inspector_ready():
@@ -181,7 +225,11 @@ def inspector_ready():
 
 def update_people():
     global PEOPLE, EXPECTED_RULES
-    enabled = (de_inspection.groups.get() and not (de_inspection.RUN / "block-off").exists()
+    groups = de_inspection.groups.get()
+    owned = network_owned()
+    if not direct_routes({entry.pw_uid for entry in de_common.people()} if owned and not groups else set()):
+        log("не удалось обновить прямые маршруты")
+    enabled = (owned and groups and not (de_inspection.RUN / "block-off").exists()
                and inspector_ready())
     current = {entry.pw_uid for entry in de_common.people()} if enabled else set()
     if current == PEOPLE:
@@ -191,7 +239,15 @@ def update_people():
         script += "add element inet %s people { %s }\n" % (TABLE, ", ".join(map(str, sorted(current))))
     if not nft(script):
         return False
+    closing = not groups and bool(PEOPLE)
     PEOPLE = current
+    if closing:
+        with LOCK:
+            for client in RELAY_CLIENTS:
+                try:
+                    client.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
     EXPECTED_RULES = installed_rules()
     log("ограничения действуют для UID: " + (", ".join(map(str, sorted(current))) or "никого"))
     return True
@@ -228,9 +284,12 @@ def stop_games():
 def reconcile_loop():
     next_config_check = 0
     while True:
-        relay_exception(True)
+        owned = network_owned()
+        relay_exception(owned)
+        if owned:
+            relay_route(True)
         now = time.monotonic()
-        if now >= next_config_check:
+        if owned and now >= next_config_check:
             de_ansible_network.reconcile()
             next_config_check = now + 60
         time.sleep(15)
@@ -354,7 +413,7 @@ def read_hello(client):
             break
         data += chunk
         if data[:1] == b"\x16":
-            if len(data) >= 5 and len(data) >= 5 + struct.unpack("!H", data[3:5])[0]:
+            if client_hello(data) is not None:
                 break
         elif b"\r\n\r\n" in data:
             break
@@ -363,11 +422,32 @@ def read_hello(client):
     return data
 
 
+def client_hello(data):
+    message = bytearray()
+    offset = 0
+    while offset + 5 <= len(data):
+        if data[offset] != 0x16:
+            return b""
+        start = offset + 5
+        offset = start + int.from_bytes(data[start - 2:start], "big")
+        if offset > len(data):
+            return None
+        message.extend(data[start:offset])
+        if len(message) >= 4:
+            if message[0] != 1:
+                return b""
+            end = 4 + int.from_bytes(message[1:4], "big")
+            if len(message) >= end:
+                return bytes(message[:end])
+    return None
+
+
 def sni_of(data):
+    data = client_hello(data)
+    if not data:
+        return ""
     try:
-        if data[0] != 0x16 or data[5] != 0x01:
-            return ""
-        place = 9 + 2 + 32
+        place = 4 + 2 + 32
         place += 1 + data[place]
         place += 2 + struct.unpack("!H", data[place:place + 2])[0]
         place += 1 + data[place]
@@ -446,23 +526,54 @@ def proxy_target(data):
     return address.hostname, port, payload, tunnel
 
 
-def connect_web(host, port, public_only, timeout=10):
-    for family, kind, protocol, _, address in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+def connect_web(host, port, public_only, timeout=10, preferred=None):
+    key = (host, port)
+    trusted = de_inspection.permanent_allow(host)
+    cached = TRUSTED_ADDRESSES.get(key) if trusted else None
+    if cached and time.monotonic() < cached[0]:
+        addresses = cached[1]
+    else:
+        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        if trusted:
+            if len(TRUSTED_ADDRESSES) >= 128:
+                TRUSTED_ADDRESSES.clear()
+            TRUSTED_ADDRESSES[key] = (time.monotonic() + 30, addresses)
+    if preferred:
+        addresses = sorted(addresses, key=lambda entry: entry[4][0] != preferred)
+    deadline = time.monotonic() + timeout
+    for family, kind, protocol, _, address in addresses:
         if public_only and not ipaddress.ip_address(address[0]).is_global:
             continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         upstream = socket.socket(family, kind, protocol)
         try:
-            upstream.settimeout(timeout)
+            upstream.settimeout(min(2, remaining))
             upstream.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, RELAY_MARK)
             upstream.connect(address)
             return upstream
         except OSError:
             upstream.close()
+    if trusted:
+        TRUSTED_ADDRESSES.pop(key, None)
     raise OSError("сайт недоступен")
 
 
 def inspect_http(client, upstream, data, host, port):
     payload, remaining = de_upstream.http_request(data, host, port)
+    if de_inspection.permanent_allow(host):
+        first, separator, rest = payload.partition(b"\r\n")
+        method, target, version = first.split()
+        path = target[len(b"http://" + de_upstream.authority(host, port).encode("ascii")):]
+        client.settimeout(None)
+        upstream.settimeout(None)
+        upstream.sendall(b" ".join((method, path, version)) + separator + rest)
+        sender = threading.Thread(target=de_upstream.send_body, args=(client, upstream, remaining), daemon=True)
+        sender.start()
+        pipe(upstream, client)
+        sender.join(timeout=5)
+        return False
     if remaining + len(payload) > de_inspection.MAX_BODY:
         raise ValueError("слишком большой запрос")
     head, pending = payload.split(b"\r\n\r\n", 1)
@@ -545,6 +656,14 @@ def inspect_http(client, upstream, data, host, port):
 
 class Handler(socketserver.BaseRequestHandler):
 
+    def setup(self):
+        with LOCK:
+            RELAY_CLIENTS.add(self.request)
+
+    def finish(self):
+        with LOCK:
+            RELAY_CLIENTS.discard(self.request)
+
     def handle(self):
         client = self.request
         login = owner_of(self.client_address)
@@ -590,8 +709,9 @@ class Handler(socketserver.BaseRequestHandler):
                 pass
             return
 
-        verdict, group = decide(host)
-        inspect_tls = port == 443 and not de_inspection.permanent_allow(host)
+        trusted = de_inspection.permanent_allow(host)
+        verdict, group = ("pass", "") if trusted else decide(host)
+        inspect_tls = port == 443 and not trusted
         if verdict != "pass" and not inspect_tls and (
                 verdict == "ai_block" or port != 80 or group not in {rule.get("name") for rule in de_inspection.groups.get()
                                             if rule.get("url_allow")}):
@@ -625,8 +745,10 @@ class Handler(socketserver.BaseRequestHandler):
                 except OSError:
                     upstream.close()
                     raise
+            elif trusted:
+                upstream = connect_web(host, port, proxy is not None, timeout=5, preferred=ip)
             else:
-                upstream = connect_web(ip, port, proxy is not None)
+                upstream = connect_web(host if secure and port == 443 else ip, port, proxy is not None)
         except OSError:
             return
         if port == 80:
@@ -664,7 +786,7 @@ class InspectionOrigin(socketserver.BaseRequestHandler):
             return
         host, port, _, _ = target
         try:
-            with connect_web(host, port, False, timeout=4) as upstream:
+            with connect_web(host, port, False, timeout=10) as upstream:
                 client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 bridge(client, upstream)
         except OSError:
@@ -793,11 +915,12 @@ def main():
     else:
         threading.Thread(target=ipv6.serve_forever, daemon=True).start()
         threading.Thread(target=dns_loop, args=(ipv6_dns,), daemon=True).start()
-    relay_exception(True)
+    owned = network_owned()
+    relay_exception(owned)
     if not rules_up() or not update_people():
         log("правила сети не поставились")
         return 1
-    if not relay_route(True):
+    if owned and not relay_route(True):
         log("не удалось настроить прямой маршрут веб-реле")
     threading.Thread(target=origin.serve_forever, daemon=True).start()
     threading.Thread(target=people_loop, daemon=True).start()

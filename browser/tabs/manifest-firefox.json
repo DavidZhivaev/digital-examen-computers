@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Digital Examen — вкладки",
-  "version": "1.3.2",
+  "version": "1.3.6",
   "permissions": [
     "tabs",
     "nativeMessaging",
@@ -29,7 +29,7 @@
   "content_scripts": [
     {
       "matches": ["*://*/*"],
-      "exclude_matches": ["*://*.1580.ru/*"],
+      "exclude_matches": ["*://*.1580.ru/*", "*://*.silvertests.ru/*"],
       "js": ["cosmetic.js"],
       "run_at": "document_start"
     },

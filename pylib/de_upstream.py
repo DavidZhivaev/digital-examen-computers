@@ -34,7 +34,7 @@ def tunnel(upstream, host, port, credential=b""):
     headers = f"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n".encode("ascii")
     upstream.sendall(headers + (credential + b"\r\n" if credential else b"") + b"\r\n")
     # Before TLS starts, the proxy can send only the CONNECT response.
-    with upstream.makefile("rb") as response:
+    with upstream.makefile("rb", buffering=0) as response:
         line = response.readline(4097)
         if not line or len(line) > 4096:
             raise OSError("прокси не ответил корректно")

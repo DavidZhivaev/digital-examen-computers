@@ -53,3 +53,18 @@ class UpstreamTests(unittest.TestCase):
                     self.assertEqual(de_upstream.tunnel(client, "example.org", 443), status)
                     responder.join()
                 self.assertTrue(received[0].startswith(b"CONNECT example.org:443 HTTP/1.1\r\n"))
+
+
+class TunnelBytesTests(unittest.TestCase):
+    def test_connect_does_not_consume_tunneled_bytes(self):
+        client, proxy = socket.socketpair()
+        with client, proxy:
+            client.settimeout(2)
+            def respond():
+                proxy.recv(4096)
+                proxy.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\nuntouched")
+            responder = Thread(target=respond)
+            responder.start()
+            self.assertEqual(de_upstream.tunnel(client, "example.org", 443), 200)
+            self.assertEqual(client.recv(9), b"untouched")
+            responder.join()

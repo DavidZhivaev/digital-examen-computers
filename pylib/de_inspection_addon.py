@@ -64,7 +64,8 @@ def scans_content(request, rules):
 
 
 AI_BLOCKED_CONNECTIONS = set()
-SCAN_TIMEOUT = 0.3
+SCAN_TIMEOUT = 1.5
+SCAN_QUEUE_LIMIT = 64
 SCAN_WORKERS = ThreadPoolExecutor(max_workers=2)
 SCAN_PENDING = set()
 
@@ -164,6 +165,13 @@ def request(flow):
     if (request.port != 443 or request.scheme != "https"
             or inspection.host_name(request.pretty_host) != inspection.host_name(request.host)):
         flow.response = blocked()
+        return
+    if (inspection.host_name(request.host) == "vk.com"
+            and request.path.partition("?")[0] == "/js/api/openapi.js"):
+        flow.response = http.Response.make(200, b"", {
+            "Content-Type": "application/javascript",
+            "Cache-Control": "no-store",
+        })
         return
     rules = inspection.groups.get()
     if not rules or (inspection.RUN / "block-off").exists() or inspection.host_allowed(request.host, rules):
@@ -350,7 +358,7 @@ async def response(flow):
 
 
 def enqueue_scan(url, scan, *args):
-    if len(SCAN_PENDING) >= 8:
+    if len(SCAN_PENDING) >= SCAN_QUEUE_LIMIT:
         return None
     future = asyncio.get_running_loop().run_in_executor(SCAN_WORKERS, scan, *args)
     SCAN_PENDING.add(future)

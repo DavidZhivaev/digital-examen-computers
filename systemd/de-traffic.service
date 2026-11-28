@@ -1,8 +1,10 @@
 [Unit]
+ConditionPathExists=!/var/lib/digital-examen/frozen
 Description=Digital Examen de-traffic
 After=network-online.target
 
 [Service]
+TimeoutStopSec=3
 Type=simple
 ExecStart=/usr/local/sbin/de-traffic
 Restart=always

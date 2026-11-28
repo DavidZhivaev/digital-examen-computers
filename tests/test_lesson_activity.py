@@ -9,6 +9,11 @@ import de_tabs
 
 
 class LessonActivityTest(unittest.TestCase):
+    def setUp(self):
+        frozen = patch("de_freeze.frozen", return_value=False)
+        frozen.start()
+        self.addCleanup(frozen.stop)
+
     def test_merges_input_and_preserves_counters_after_restart(self):
         start = 1200
         with tempfile.TemporaryDirectory() as directory, patch.object(activity, "STATE", Path(directory) / "state"):

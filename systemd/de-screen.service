@@ -1,7 +1,9 @@
 [Unit]
+ConditionPathExists=!/var/lib/digital-examen/frozen
 Description=Digital Examen screen tiles sender
 
 [Service]
+TimeoutStopSec=3
 ExecStart=/usr/local/sbin/de-screen
 Restart=always
 RestartSec=5

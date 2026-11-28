@@ -92,7 +92,7 @@ def main():
         return 1
 
     say("Постановка %s на учёт, сайт %s" % (hostname, API))
-    name = "%dk-%d-%d" % place
+    name = de_common.place_name(place)
     try:
         created = call("/api/computers/device/enroll", {
             "hostname": hostname,
@@ -120,7 +120,7 @@ def main():
         de_common.write_file(POLICY_FILE, json.dumps(policy, sort_keys=True))
         de_common.write_file(de_common.SCREEN_ENABLED_FILE, "0" if policy.get("screen_enabled") is False else "1")
 
-    say("Готово, компьютер на учёте как %s" % created.get("computer", name))
+    say("Готово, компьютер на учёте как %s" % hostname)
     return 0
 
 

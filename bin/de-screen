@@ -36,6 +36,7 @@ WATCH_INTERVAL = 3
 GRAB_SECONDS = 6
 
 WORK_DIR = os.path.join(de_common.RUN_DIR, "screen")
+SESSION_FILE = os.path.join(WORK_DIR, "archive-session.json")
 MODE_FILE = os.path.join(de_common.RUN_DIR, "screen-mode")
 QUEUE_DIR = os.path.join(de_common.STATE_DIR, "screen-queue")
 QUEUE_LIMIT = 20 * 1024 * 1024
@@ -298,7 +299,7 @@ class Stream:
                 pieces.append([(col, row, width), webp(picture.crop(box))])
         return current, keyframe, pieces
 
-    def body(self, login, keyframe, pieces):
+    def body(self, login, keyframe, pieces, session_start=None):
         header = {
             "version": 4,
             "kind": self.kind,
@@ -312,6 +313,8 @@ class Stream:
             "keyframe": keyframe,
             "pieces": [[run[0], run[1], run[2], len(blob)] for run, blob in pieces],
         }
+        if session_start is not None:
+            header["session_start"] = session_start
         data = json.dumps(header).encode() + b"\n"
         for run, blob in pieces:
             data += blob
@@ -421,9 +424,9 @@ class Senders:
             except (OSError, ValueError):
                 pass
 
-    def publish_archive(self, key, login, picture):
+    def publish_archive(self, key, login, picture, session_start):
         with self.archive_capture_ready:
-            self.archive_picture = (key, login, picture)
+            self.archive_picture = (key, login, picture, session_start)
             self.archive_capture_ready.notify()
 
     def build_archive(self):
@@ -432,7 +435,7 @@ class Senders:
         while True:
             with self.archive_capture_ready:
                 self.archive_capture_ready.wait_for(lambda: self.archive_picture is not None)
-                key, login, picture = self.archive_picture
+                key, login, picture, session_start = self.archive_picture
                 self.archive_picture = None
             if not screen_enabled():
                 last_key = None
@@ -443,7 +446,7 @@ class Senders:
             current, keyframe, pieces = storage.build(picture.resize(STORE_SIZE, Image.BILINEAR))
             if not pieces:
                 continue
-            kept = remember(storage.body(login, keyframe, pieces), storage.frame_no)
+            kept = remember(storage.body(login, keyframe, pieces, session_start), storage.frame_no)
             storage.frame_no += 1
             if kept:
                 storage.previous = current
@@ -508,6 +511,12 @@ def main():
 
     scale_worker = None
     previous_mode = 0
+    boot_at = next((int(line.split()[1]) for line in de_common.read_file("/proc/stat").splitlines()
+                    if line.startswith("btime ")), int(time.time()))
+    try:
+        archived_key, session_start = json.loads(de_common.read_file(SESSION_FILE))
+    except (TypeError, ValueError):
+        archived_key, session_start = None, boot_at
     while True:
         started = time.monotonic()
         if not screen_enabled():
@@ -537,6 +546,11 @@ def main():
         login = session.get("Name", "")
 
         key = session.get("Id", "") + "/" + login
+        if archived_key != key:
+            if archived_key is not None:
+                session_start = int(time.time())
+            archived_key = key
+            de_common.write_file(SESSION_FILE, json.dumps([key, session_start]), mode=0o600)
         if key != last_key:
             senders.clear_live()
             next_store = next_live = 0.0
@@ -579,7 +593,7 @@ def main():
 
         if started >= next_store:
             next_store = started + STORE_INTERVAL
-            senders.publish_archive(key, login, picture)
+            senders.publish_archive((key, session_start), login, picture, session_start)
 
 
 if __name__ == "__main__":

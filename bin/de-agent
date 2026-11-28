@@ -16,10 +16,12 @@ import urllib.request
 sys.path.insert(0, "/usr/local/lib/digital-examen")
 
 import de_common
+import de_freeze
 import de_control
 import de_inspection
 import de_learned
 import de_lesson_activity
+import de_network_events
 import de_mass_commands
 import de_tabs
 
@@ -79,10 +81,11 @@ def save_policy(policy):
     if not isinstance(policy, dict):
         return
     text = json.dumps(policy, sort_keys=True)
-    if de_common.read_file(POLICY_FILE) == text:
-        return
-    de_common.write_file(POLICY_FILE, text)
-    log("политика ограничений обновлена")
+    if de_common.read_file(POLICY_FILE) != text:
+        de_common.write_file(POLICY_FILE, text)
+        log("политика ограничений обновлена")
+    if policy.get("groups"):
+        de_common.write_file(os.path.join(de_common.RUN_DIR, "network-owned"), "1", 0o600)
 
 
 def power(action):
@@ -92,6 +95,8 @@ def power(action):
 
 def apply(command):
     name = command.get("name", "")
+    if de_freeze.frozen() and name != "policy":
+        return
 
     if name == "live":
         write_mode(command.get("interval", 1))
@@ -102,7 +107,7 @@ def apply(command):
         return
 
     if name == "policy":
-        save_policy(command.get("policy", {}))
+        # Only the authoritative heartbeat may change suspension; queued policies can be stale.
         return
 
     if name == "close-tab":
@@ -160,17 +165,13 @@ def cpu_sample():
 
 
 def network_bytes():
-    total = 0
-    try:
-        for line in open("/proc/net/dev").readlines()[2:]:
-            name, rest = line.split(":", 1)
-            if name.strip() == "lo":
-                continue
-            fields = rest.split()
-            total += int(fields[0]) + int(fields[8])
-    except (IOError, ValueError, IndexError):
-        return None
-    return total
+    device = de_network_events.active_interface()
+    if device:
+        try:
+            return device, de_network_events.interface_bytes(device)
+        except (OSError, ValueError):
+            pass
+    return None
 
 
 def first_number(path):
@@ -188,6 +189,8 @@ def stats_loop():
 
     while True:
         time.sleep(STATS_INTERVAL)
+        if de_freeze.frozen():
+            continue
         free_disk, total_disk = disk_numbers()
         free_memory, total_memory = memory_numbers()
 
@@ -201,8 +204,9 @@ def stats_loop():
         current_net = network_bytes()
         now = time.time()
         kbits = None
-        if previous_net is not None and current_net is not None and now > previous_time:
-            kbits = (current_net - previous_net) * 8.0 / 1000.0 / (now - previous_time)
+        if (previous_net and current_net and current_net[0] == previous_net[0]
+                and current_net[1] >= previous_net[1] and now > previous_time):
+            kbits = (current_net[1] - previous_net[1]) * 8.0 / 1000.0 / (now - previous_time)
         previous_net = current_net
         previous_time = now
 
@@ -233,6 +237,8 @@ def stats_loop():
             de_lesson_activity.mark_privileged()
         previous_identity = identity
         de_tabs.activate(identity, None if admin else rules, [] if admin else url_groups, bool(groups) and not admin)
+        if de_freeze.frozen():
+            continue
 
         uptime = first_number("/proc/uptime")
         try:
@@ -260,6 +266,12 @@ def save_heartbeat_policy(answer):
         if de_common.read_file(de_common.SCREEN_ENABLED_FILE) != enabled:
             de_common.write_file(de_common.SCREEN_ENABLED_FILE, enabled)
         save_policy(policy)
+        freezing = policy.get("frozen") is True
+        if freezing:
+            de_tabs.activate(None, None, [], False)
+            de_lesson_activity.active = False
+            de_lesson_activity.configure(None)
+        de_freeze.apply(freezing)
 
 
 def heartbeat_loop():
@@ -267,46 +279,56 @@ def heartbeat_loop():
                  if line.startswith("btime ")), None)
     last_conflict = ""
     while True:
+        deadline = time.monotonic() + HEARTBEAT_INTERVAL
         hostname = socket.gethostname()
         place = de_common.hostname_place(hostname)
-        target = "%dk-%d-%d" % place if place else COMPUTER
+        target = de_common.place_name(place) if place else COMPUTER
         moved = target != COMPUTER
         url = API.rstrip("/") + "/api/computers/device/heartbeat"
-        payload = {"computer": COMPUTER, "online": True, "login": de_common.current_user(),
-                   "boot": boot, "command_jobs": True}
-        report = de_lesson_activity.snapshot(time.time())
+        frozen = de_freeze.frozen()
+        payload = {"computer": COMPUTER, "online": True,
+                   "boot": boot, "command_jobs": not frozen}
+        if not frozen:
+            payload["login"] = de_common.current_user()
+        network = None if frozen else de_network_events.snapshot(time.time())
+        if network is not None:
+            payload["network"] = network
+        report = None if frozen else de_lesson_activity.snapshot(time.time())
         if report:
             payload["lesson_activity"] = report[0]
         if place:
             payload.update(hostname=hostname, sync_screen=moved)
         try:
             try:
-                answer = de_common.send_json(url, payload, "proxy", 15)
+                answer = de_common.send_json(url, payload, "proxy", HEARTBEAT_INTERVAL)
             except urllib.error.HTTPError as error:
                 if moved and error.code == 409:
                     if target != last_conflict:
                         log("место %s занято. Удалите прежнее устройство в настройках кабинета" % target)
                         last_conflict = target
                     payload.pop("hostname", None)
-                    answer = de_common.send_json(url, payload, "proxy", 15)
+                    answer = de_common.send_json(url, payload, "proxy", HEARTBEAT_INTERVAL)
                     save_heartbeat_policy(answer)
-                    time.sleep(HEARTBEAT_INTERVAL)
+                    time.sleep(max(0, deadline - time.monotonic()))
                     continue
                 if not moved or error.code != 403:
                     raise
                 payload["computer"] = target
-                answer = de_common.send_json(url, payload, "proxy", 15, identity=target)
+                answer = de_common.send_json(url, payload, "proxy", HEARTBEAT_INTERVAL, identity=target)
             if answer.get("remove_agent") is True and answer.get("computer") == COMPUTER:
                 subprocess.run([
                     "systemd-run", "--unit=de-agent-removal", "--collect", "/bin/sh",
                     "/opt/digital-examen-computers/delete.sh",
                 ], check=True)
                 return
-            de_lesson_activity.configure(answer.get("lesson_start"))
+            if not answer.get("policy", {}).get("frozen"):
+                de_lesson_activity.configure(answer.get("lesson_start"))
+            if network is not None and answer.get("network_saved"):
+                de_network_events.acknowledge(network)
             if report:
                 de_lesson_activity.acknowledged(report)
             save_heartbeat_policy(answer)
-            if answer.get("command_pending") is True:
+            if not de_freeze.frozen() and answer.get("command_pending") is True:
                 COMMAND_SIGNAL.set()
             last_conflict = ""
             if moved and answer.get("computer") == target and answer.get("screen_ready"):
@@ -324,7 +346,7 @@ def heartbeat_loop():
                     de_common.write_file(de_common.SCREEN_ENABLED_FILE, "0")
         except (OSError, ValueError, subprocess.CalledProcessError):
             pass
-        time.sleep(HEARTBEAT_INTERVAL)
+        time.sleep(max(0, deadline - time.monotonic()))
 
 
 def command_jobs_loop():
@@ -334,6 +356,9 @@ def command_jobs_loop():
         if result is None:
             COMMAND_SIGNAL.wait()
             COMMAND_SIGNAL.clear()
+        if de_freeze.frozen():
+            time.sleep(1)
+            continue
         try:
             if result is not None:
                 de_common.send_json(endpoint + "result", result, "proxy", 10)
@@ -362,6 +387,9 @@ def command_jobs_loop():
 def learned_loop():
     endpoint = API.rstrip("/") + "/api/computers/device/learned-blocks"
     while True:
+        if de_freeze.frozen():
+            time.sleep(1)
+            continue
         try:
             records = [(url, term, expires - 86400) for url, terms in de_learned.active().items()
                        for term, expires in terms.items()]
@@ -381,8 +409,10 @@ def main():
         return 0
 
     write_mode(0)
+    de_freeze.apply(de_freeze.frozen())
     threading.Thread(target=de_tabs.listen, daemon=True).start()
     threading.Thread(target=de_lesson_activity.listen, daemon=True).start()
+    threading.Thread(target=de_network_events.monitor, daemon=True).start()
     threading.Thread(target=stats_loop, daemon=True).start()
     if API:
         threading.Thread(target=heartbeat_loop, daemon=True).start()
@@ -390,12 +420,17 @@ def main():
         threading.Thread(target=command_jobs_loop, daemon=True).start()
 
     while True:
+        if de_freeze.frozen():
+            time.sleep(1)
+            continue
         try:
             answer = ask()
         except (OSError, ValueError):
             time.sleep(5)
             continue
 
+        if de_freeze.frozen():
+            continue
         if answer.get("interval") is not None:
             write_mode(answer.get("interval") or 0)
 

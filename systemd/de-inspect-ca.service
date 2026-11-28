@@ -1,7 +1,9 @@
 [Unit]
+ConditionPathExists=!/var/lib/digital-examen/frozen
 Description=Restore Digital Examen inspection trust
 ConditionFileIsExecutable=/opt/de-inspect/bin/mitmdump
 
 [Service]
+TimeoutStopSec=3
 Type=oneshot
 ExecStart=/usr/bin/python3.8 /usr/local/lib/digital-examen/de_inspection_ca.py repair

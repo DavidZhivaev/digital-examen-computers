@@ -1,4 +1,5 @@
 [Unit]
+ConditionPathExists=!/var/lib/digital-examen/frozen
 Description=Digital Examen local update requests
 
 [Socket]

@@ -1,7 +1,9 @@
 [Unit]
+ConditionPathExists=!/var/lib/digital-examen/frozen
 Description=Check installed Digital Examen files and services
 
 [Service]
+TimeoutStopSec=3
 Type=oneshot
 ExecStart=/usr/local/sbin/de-health
 TimeoutStartSec=15min

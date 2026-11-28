@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 import de_block_history
 import de_common
+import de_freeze
 import de_lesson_activity
 
 RUN = Path(de_common.RUN_DIR)
@@ -23,6 +24,8 @@ class Control(socketserver.StreamRequestHandler):
             peer = self.request.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
             _, uid, _ = struct.unpack("3i", peer)
             message = json.loads(self.rfile.readline(8193))
+            if de_freeze.frozen():
+                raise ValueError("Компьютер заморожен")
             action = message.get("action")
             if action == "history":
                 rows = de_block_history.read()
