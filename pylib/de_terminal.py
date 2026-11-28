@@ -11,6 +11,7 @@ import re
 import select
 import shutil
 import signal
+import socket
 import struct
 import termios
 import threading
@@ -33,13 +34,13 @@ class TerminalGone(OSError):
 TRANSPORT = threading.local()
 
 
-def request(action, session, payload=None, after=0):
+def request(action, session, payload=None, after=0, connections=None):
     target = urllib.parse.urlsplit(de_common.setting('DE_SCREEN_URL'))
     if target.scheme not in ('http', 'https') or not target.hostname or target.username:
         raise ValueError('Некорректный адрес сервера терминалов')
     values = dict(computer=de_common.computer(), session=session)
     path = target.path.rstrip('/') + '/terminal/' + action
-    timeout = 22 if payload is None else 6
+    timeout = 50 if payload is None else 6
     headers = {'X-De-Secret': de_common.secret('screen')}
     body = None
     if payload is None:
@@ -57,6 +58,8 @@ def request(action, session, payload=None, after=0):
         factory = http.client.HTTPSConnection if target.scheme == 'https' else http.client.HTTPConnection
         connection = factory(target.hostname, target.port, timeout=timeout)
         TRANSPORT.connection, TRANSPORT.origin = connection, origin
+    if connections is not None:
+        connections.add(connection)
     try:
         connection.request('GET' if payload is None else 'POST', path, body, headers)
         response = connection.getresponse()
@@ -68,6 +71,8 @@ def request(action, session, payload=None, after=0):
         return json.loads(data.decode('utf-8'))
     except (OSError, ValueError, http.client.HTTPException) as error:
         connection.close()
+        if connections is not None:
+            connections.discard(connection)
         TRANSPORT.connection = None
         if isinstance(error, http.client.HTTPException):
             raise OSError('Соединение терминала прервано') from error
@@ -88,6 +93,7 @@ class Session:
         if not self.cwd.startswith('/') or not os.path.isdir(self.cwd):
             self.cwd = os.path.expanduser('~')
         self.stop = threading.Event()
+        self.connections = set()
         self.close_lock = threading.Lock()
         self.input_after = int(command.get('input_after', 0))
         self.output_after = int(command.get('output_after', 0))
@@ -145,7 +151,7 @@ class Session:
         deadline = time.monotonic() + 30
         while not self.stop.is_set() and not de_freeze.frozen() and time.monotonic() < deadline:
             try:
-                return request('output', self.sid, payload).get('ok') is True
+                return request('output', self.sid, payload, connections=self.connections).get('ok') is True
             except TerminalGone:
                 return False
             except (OSError, ValueError):
@@ -158,7 +164,8 @@ class Session:
             if self.output_after:
                 self.emit('\r\n\x1bc')
             while not self.stop.is_set() and not de_freeze.frozen():
-                ready, _, _ = select.select([self.fd], [], [], .05)
+                batch_started = time.monotonic()
+                ready, _, _ = select.select([self.fd], [], [], .5)
                 if not ready:
                     continue
                 try:
@@ -173,8 +180,12 @@ class Session:
                 text = decoder.decode(data)
                 if text and not self.emit(text):
                     return
+                # Backpressure caps a noisy command at about 160 KiB/s without dropping bytes.
+                self.stop.wait(max(0, .05 - (time.monotonic() - batch_started)))
             if not de_freeze.frozen():
                 self.emit(decoder.decode(b'', final=True), closed=True)
+        except (OSError, ValueError):
+            pass
         finally:
             self.close()
 
@@ -183,7 +194,7 @@ class Session:
         try:
             while not self.stop.is_set() and not de_freeze.frozen():
                 try:
-                    answer = request('poll', self.sid, after=self.input_after)
+                    answer = request('poll', self.sid, after=self.input_after, connections=self.connections)
                     last_contact = time.monotonic()
                     if answer.get('closed'):
                         break
@@ -214,6 +225,14 @@ class Session:
                 return
             self.save_cwd()
             self.stop.set()
+            for connection in tuple(self.connections):
+                try:
+                    if connection.sock is not None:
+                        connection.sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                connection.close()
+            self.connections.clear()
             try:
                 os.killpg(self.pid, signal.SIGHUP)
             except ProcessLookupError:

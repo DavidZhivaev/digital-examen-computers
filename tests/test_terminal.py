@@ -79,11 +79,16 @@ class PTYTests(unittest.TestCase):
         self.assertIn(str(os.getuid()), self.read(self.session, 'UID_END'))
 
     def test_freeze_closes_the_pty_without_sending_output(self):
+        from unittest.mock import Mock
+        connection = Mock()
+        self.session.connections.add(connection)
         with patch.object(de_terminal.de_freeze, 'frozen', return_value=True), \
                 patch.object(de_terminal, 'request') as send:
             self.session.read_loop()
             self.assertTrue(self.session.stop.is_set())
             send.assert_not_called()
+            connection.sock.shutdown.assert_called_once_with(de_terminal.socket.SHUT_RDWR)
+            connection.close.assert_called_once()
 
 
 class TerminalTransportTests(unittest.TestCase):

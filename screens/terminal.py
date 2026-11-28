@@ -8,6 +8,7 @@ import time
 ID = re.compile(r"[0-9a-f]{64}")
 LIMIT = 1024 * 1024
 LEASE = 90
+POLL_SECONDS = 45
 
 
 class Broker:
@@ -95,7 +96,7 @@ class Broker:
             state = self.get(sid, computer, None if agent else owner)
             if not agent:
                 state['touch'] = time.monotonic()
-            deadline = time.monotonic() + 18
+            deadline = time.monotonic() + POLL_SECONDS
             while True:
                 self.expire()
                 if agent:
@@ -113,7 +114,7 @@ class Broker:
                 if remaining <= 0:
                     return dict(events=[], closed=False) if agent else dict(
                         data='', cursor=state['cursor'], closed=False, ready=state['ready'])
-                self.changed.wait(min(remaining, 1))
+                self.changed.wait(min(remaining, max(.01, state['touch'] + LEASE - time.monotonic())))
 
 
 BROKER = Broker()
@@ -169,6 +170,8 @@ def handle(handler, route, query, post, queue_command, safe_name):
             else:
                 raise ValueError('Неизвестная операция терминала')
         handler.reply(200, {'ok': True})
+    except (BrokenPipeError, ConnectionResetError):
+        pass
     except KeyError:
         handler.reply(404, {'error': 'Сеанс терминала завершён'})
     except (ValueError, TypeError) as error:
